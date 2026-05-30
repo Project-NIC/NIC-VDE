@@ -422,12 +422,28 @@ class VolkovData:
         self.overlay = ("info", "Info", rows)
 
     def _do_repair(self) -> None:
-        """F2: inside MLA → check the file and report damaged slots; else → file info."""
+        """F2: check an MLA container and report damaged slots.
+
+        Works both inside a container (check the open file) and from the
+        filesystem with the cursor on an .mla file (check it in place).
+        On anything that isn't an MLA there is nothing to repair → show info.
+        """
         be = self.panel.backend
         if isinstance(be, vc.MlaBackend):
             self.overlay = ("info", "Repair / check", be.repair_info())
-        else:
-            self._do_info()
+            return
+        cur = self.panel.current
+        if cur is not None and cur.kind == "mla" and hasattr(be, "path_of"):
+            try:
+                probe = vc.MlaBackend(be.path_of(cur))
+                rows = probe.repair_info()
+                probe.close()
+            except vc.BackendError as exc:
+                self.overlay = ("message", "Error", str(exc))
+                return
+            self.overlay = ("info", "Repair / check", rows)
+            return
+        self._do_info()
 
     def _do_f6(self) -> None:
         """F6: inside MLA → export whole container to CSV; else → rename."""
