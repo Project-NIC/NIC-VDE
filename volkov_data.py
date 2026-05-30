@@ -220,8 +220,8 @@ class VolkovData:
             ("9", "PullDn"), ("10", "Quit"),
         ]
         n = len(labels)
-        edge_gap = 1   # black gap before each cell + one trailing (n+1 narrow cells)
-        num_gap = 2    # black spaces between the number and its cyan box
+        edge_gap = 3   # black gap BETWEEN pairs (before each number)
+        num_gap = 0    # number sticks to its own box (VC style: "1Help")
         nums_len = sum(len(num) for num, _ in labels)
         # remaining width is split equally across the 10 cyan label boxes
         fixed = nums_len + n * num_gap + (n + 1) * edge_gap
@@ -231,11 +231,10 @@ class VolkovData:
         frags: Fragments = []
         for i, (num, label) in enumerate(labels):
             w = box_w + (1 if i < rem else 0)
-            frags.append(("class:fkey-gap", " " * edge_gap))   # kick off the number
-            frags.append(("class:fkey-num", num))
-            frags.append(("class:fkey-gap", " " * num_gap))    # two before the box
-            frags.append(("class:fkey-label", fit(" " + label, w)))
-        frags.append(("class:fkey-gap", " " * edge_gap))       # trailing narrow cell
+            frags.append(("class:fkey-gap", " " * edge_gap))   # gap between pairs
+            frags.append(("class:fkey-num", num))              # number...
+            frags.append(("class:fkey-label", fit(" " + label, w)))  # ...stuck to its box
+        frags.append(("class:fkey-gap", " " * edge_gap))       # trailing gap
         return frags
 
     # ── app wiring ─────────────────────────────────────────────────────────
