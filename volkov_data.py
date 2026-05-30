@@ -28,6 +28,7 @@ Run:  python3 volkov_data.py [left_dir] [right_dir]
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from datetime import datetime
 
@@ -637,7 +638,35 @@ class VolkovData:
         cur = self.panel.current
         if cur is None or cur.name == "..":
             return
-        self.overlay = ("input", "Rename", "New name:", cur.name, "rename")
+        # VC "RenMov": default destination is the other panel, so a bare Enter
+        # MOVES the file there; edit it down to just a name to rename in place.
+        if isinstance(self.other.backend, vc.LocalBackend):
+            dest = os.path.join(self.other.backend.location, cur.name)
+        else:
+            dest = cur.name
+        self.overlay = ("input", "Rename / move", "New name or path:", dest, "renmov")
+
+    def _renmov(self, dest: str) -> None:
+        """F6: a bare name renames in place; a path moves to the host filesystem."""
+        be = self.panel.backend
+        cur = self.panel.current
+        if cur is None or cur.name == "..":
+            return
+        has_path = os.sep in dest or (os.altsep and os.altsep in dest)
+        if not has_path:
+            be.rename(cur, dest)            # no path → plain rename
+            self.panel.reload()
+            return
+        if not isinstance(be, vc.LocalBackend):
+            raise vc.BackendError("Move is only supported on the filesystem.")
+        src = os.path.join(be.location, cur.name)
+        dst = os.path.join(dest, cur.name) if os.path.isdir(dest) else dest
+        try:
+            shutil.move(src, dst)
+        except OSError as exc:
+            raise vc.BackendError(f"move failed: {exc}") from exc
+        self.panel.reload()
+        self.other.reload()
 
     def _do_delete(self) -> None:
         cur = self.panel.current
@@ -685,9 +714,9 @@ class VolkovData:
         try:
             if action == "mkdir":
                 self.panel.backend.mkdir(buf)
-            elif action == "rename":
-                self.panel.backend.rename(self.panel.current, buf)
-            self.panel.reload()
+                self.panel.reload()
+            elif action == "renmov":
+                self._renmov(buf)
         except vc.BackendError as exc:
             self.overlay = ("message", "Error", str(exc))
 
