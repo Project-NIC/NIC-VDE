@@ -220,21 +220,22 @@ class VolkovData:
             ("9", "PullDn"), ("10", "Quit"),
         ]
         n = len(labels)
-        gap = 1  # spacing between cells, for readability
-        cell = (width - gap * (n - 1)) // n  # equal-width cells
+        edge_gap = 1   # black gap before each cell + one trailing (n+1 narrow cells)
+        num_gap = 2    # black spaces between the number and its cyan box
+        nums_len = sum(len(num) for num, _ in labels)
+        # remaining width is split equally across the 10 cyan label boxes
+        fixed = nums_len + n * num_gap + (n + 1) * edge_gap
+        box_w = max(1, (width - fixed) // n)
+        rem = max(0, width - fixed - box_w * n)  # leftover columns → widen first boxes
+
         frags: Fragments = []
-        total = 0
         for i, (num, label) in enumerate(labels):
-            # number on black, then a space, then the label field on cyan
+            w = box_w + (1 if i < rem else 0)
+            frags.append(("class:fkey-gap", " " * edge_gap))   # kick off the number
             frags.append(("class:fkey-num", num))
-            field = fit("   " + label, max(0, cell - len(num)))  # gap: number→label
-            frags.append(("class:fkey-label", field))
-            total += len(num) + len(field)
-            if i < n - 1:  # gap between cells (on the bar background)
-                frags.append(("class:fkey-gap", " " * gap))
-                total += gap
-        if total < width:
-            frags.append(("class:fkey-gap", " " * (width - total)))
+            frags.append(("class:fkey-gap", " " * num_gap))    # two before the box
+            frags.append(("class:fkey-label", fit(" " + label, w)))
+        frags.append(("class:fkey-gap", " " * edge_gap))       # trailing narrow cell
         return frags
 
     # ── app wiring ─────────────────────────────────────────────────────────
