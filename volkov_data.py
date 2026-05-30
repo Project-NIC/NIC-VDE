@@ -17,9 +17,11 @@ Keys
   F6 RenMov      rename the selected item
   F7 Mkdir       create a directory
   F8 Delete      delete the selected item (with confirmation)
-  F9 Menu        (placeholder)
+  F9 Menu        pull-down menu bar (←/→ switch column, ↑/↓ move, Enter pick)
+                 Left/Right → sort the panel (Name/Extension/Time/Size/…),
+                 Files → the F-key actions, Commands → swap/re-read, …
   F10/q/Ctrl-Q   quit
-  Esc            close any overlay/dialog
+  Esc            close any overlay/dialog (or the open menu)
 
 Run:  python3 volkov_data.py [left_dir] [right_dir]
 """
@@ -56,23 +58,58 @@ def fit(s: str, w) -> str:
 class Panel:
     """One pane: a storage backend + a cursor over its entries."""
 
+    # sort keys for each mode (".." and group order are handled separately)
+    SORT_KEYS = {
+        "name": lambda e: e.name.lower(),
+        "ext": lambda e: (os.path.splitext(e.name)[1].lower(), e.name.lower()),
+        "time": lambda e: e.mtime or 0,
+        "size": lambda e: e.size,
+    }
+
     def __init__(self, backend: vc.Backend):
         self.backend = backend
         self.entries: list[vc.Entry] = []
         self.selected = 0
         self.scroll = 0
         self.error = ""
+        self.sort_mode = "name"     # name | ext | time | size | unsorted
+        self.sort_reverse = False
         self.reload()
 
     def reload(self) -> None:
         try:
-            self.entries = self.backend.list()
+            self.entries = self._sorted(self.backend.list())
             self.error = ""
         except vc.BackendError as exc:
             self.entries = [vc.Entry("..", True, kind="updir")]
             self.error = str(exc)
         self.selected = max(0, min(self.selected, len(self.entries) - 1))
         self.scroll = 0
+
+    def set_sort(self, mode: str) -> None:
+        """Switch sort mode, remembering which entry the cursor is on."""
+        keep = self.current.name if self.current else None
+        self.sort_mode = mode
+        self.reload()
+        if keep is not None:  # try to keep the cursor on the same item
+            for i, e in enumerate(self.entries):
+                if e.name == keep:
+                    self.selected = i
+                    break
+
+    def _sorted(self, entries: list[vc.Entry]) -> list[vc.Entry]:
+        """Order entries per the panel's sort mode, '..' first, dirs before files."""
+        updir = [e for e in entries if e.name == ".."]
+        rest = [e for e in entries if e.name != ".."]
+        if self.sort_mode != "unsorted":
+            key = self.SORT_KEYS.get(self.sort_mode, self.SORT_KEYS["name"])
+            rest.sort(key=lambda e: (0 if e.is_container else 1, key(e)))
+        if self.sort_reverse:
+            # flip within each group so dirs stay on top (VC behaviour)
+            cont = [e for e in rest if e.is_container][::-1]
+            files = [e for e in rest if not e.is_container][::-1]
+            rest = cont + files
+        return updir + rest
 
     @property
     def current(self) -> vc.Entry | None:
@@ -128,7 +165,104 @@ class VolkovData:
         #                | ("confirm", title, message, action)
         #                | ("message", title, message)
         self.overlay = None
+        # pull-down menu state: None when closed, else [col, row] of the cursor
+        self.menu = None
         self.app = self._build_app()
+
+    # ── pull-down menu (top bar) ───────────────────────────────────────────
+    MENU_TITLES = ["Left", "Files", "Commands", "Options", "Right"]
+
+    def _menu_items(self, col: int) -> list:
+        """Items for one top-bar column: (label, action|None) or None=separator.
+
+        A None action means "recognised but not implemented yet" — it still
+        shows in the menu (greyed) so the layout matches real VC.
+        """
+        if col in (0, 4):  # Left / Right — operate on that panel
+            pi = 0 if col == 0 else 1
+            p = self.panels[pi]
+            tick = lambda m: "• " if p.sort_mode == m else "  "
+            return [
+                (tick("name") + "Name", lambda: self.panels[pi].set_sort("name")),
+                (tick("ext") + "Extension", lambda: self.panels[pi].set_sort("ext")),
+                (tick("time") + "Time", lambda: self.panels[pi].set_sort("time")),
+                (tick("size") + "Size", lambda: self.panels[pi].set_sort("size")),
+                (tick("unsorted") + "Unsorted", lambda: self.panels[pi].set_sort("unsorted")),
+                None,
+                (("• " if p.sort_reverse else "  ") + "Reverse", lambda: self._toggle_reverse(pi)),
+                None,
+                ("  Re-read", lambda: self.panels[pi].reload()),
+            ]
+        if col == 1:  # Files — the F-key actions
+            return [
+                ("Info", self._do_info),
+                ("Repair / check", self._do_repair),
+                ("View", self._do_view),
+                ("Values", lambda: self._do_view(with_values=True)),
+                ("Copy", self._do_copy),
+                ("Rename or move", self._do_f6),
+                ("Make directory", self._do_mkdir),
+                ("Delete", self._do_delete),
+                None,
+                ("Quit", lambda: self.app.exit()),
+            ]
+        if col == 2:  # Commands
+            return [
+                ("Swap panels", self._swap_panels),
+                ("Re-read both", self._reread_both),
+                None,
+                ("Find file", None),
+                ("History", None),
+                ("Compare directories", None),
+            ]
+        # col == 3 — Options (not wired yet, shown for parity with VC)
+        return [
+            ("General...", None),
+            ("Interface...", None),
+            ("Panels...", None),
+            None,
+            ("Save setup", None),
+        ]
+
+    def _toggle_reverse(self, pi: int) -> None:
+        self.panels[pi].sort_reverse = not self.panels[pi].sort_reverse
+        self.panels[pi].reload()
+
+    def _swap_panels(self) -> None:
+        self.panels.reverse()
+        self.active ^= 1
+
+    def _reread_both(self) -> None:
+        for p in self.panels:
+            p.reload()
+
+    def _open_menu(self) -> None:
+        self.menu = [self.active * 4, 0]  # Left bar over left panel, Right over right
+
+    def _menu_move_col(self, d: int) -> None:
+        self.menu[0] = (self.menu[0] + d) % len(self.MENU_TITLES)
+        self.menu[1] = 0
+
+    def _menu_move_row(self, d: int) -> None:
+        items = self._menu_items(self.menu[0])
+        r = self.menu[1]
+        for _ in range(len(items)):           # step over separators
+            r = (r + d) % len(items)
+            if items[r] is not None:
+                break
+        self.menu[1] = r
+
+    def _menu_activate(self) -> None:
+        items = self._menu_items(self.menu[0])
+        row = items[self.menu[1]] if 0 <= self.menu[1] < len(items) else None
+        self.menu = None
+        if row is None:
+            return
+        _label, action = row
+        if action is None:
+            self.overlay = ("message", "Menu", "This command is not implemented yet.")
+        else:
+            action()
 
     @property
     def panel(self) -> Panel:
@@ -154,6 +288,8 @@ class VolkovData:
         body = [l + r for l, r in zip(left, right)]
         screen = [self._menubar(width), *body,
                   self._cmdline(width), self._fkeybar(width)]
+        if self.menu is not None:
+            self._draw_menu(screen, width)
         if self.overlay:
             self._draw_overlay(screen, width, height)
         return screen
@@ -229,13 +365,21 @@ class VolkovData:
         field_w = inner - 2 - len(right) - 1
         return " " + fit(left, field_w) + " " + right + " "
 
+    def _menu_col_x(self) -> list[int]:
+        """Left column where each top-bar title's box starts (for the dropdown)."""
+        xs, used = [], 0
+        for name in self.MENU_TITLES:
+            xs.append(used)
+            used += len(" " + name + " ")
+        return xs
+
     def _menubar(self, width: int) -> Fragments:
-        items = ["Left", "Files", "Commands", "Options", "Right"]
         frags: Fragments = []
         used = 0
-        for name in items:
+        for i, name in enumerate(self.MENU_TITLES):
             seg = " " + name + " "
-            frags.append(("class:menu", seg))
+            opened = self.menu is not None and self.menu[0] == i
+            frags.append(("class:menu-sel" if opened else "class:menu", seg))
             used += len(seg)
         clock = datetime.now().strftime("%H:%M")
         frags.append(("class:menu", " " * max(0, width - used - len(clock) - 1)))
@@ -263,6 +407,33 @@ class VolkovData:
             frags.append(("class:fkey-label", fit(" " + label, box_w)))
         frags.append(("class:fkey-gap", " " * (edge_gap + rem)))  # absorb remainder
         return frags
+
+    # ── pull-down menu drawing ──────────────────────────────────────────────
+    def _draw_menu(self, screen: list[Fragments], width: int) -> None:
+        col, cursor = self.menu
+        items = self._menu_items(col)
+        labels = [("─" if it is None else it[0]) for it in items]
+        bw = max(len(s) for s in labels) + 2
+        x = self._menu_col_x()[col]
+        if x + bw + 2 >= width:            # keep the box on-screen
+            x = max(0, width - bw - 2)
+        bd = "class:menu-border"
+        self._overlay_row(screen, 1, x, [(bd, TL + H * bw + TR)], width)
+        for j, it in enumerate(items):
+            if it is None:
+                self._overlay_row(screen, 2 + j, x,
+                                  [(bd, DL + DH * bw + DR)], width)
+                continue
+            st = "class:menu-item-sel" if j == cursor else "class:menu-item"
+            self._overlay_row(screen, 2 + j, x,
+                              [(bd, V), (st, fit(" " + it[0], bw)), (bd, V)], width)
+        self._overlay_row(screen, 2 + len(items), x,
+                          [(bd, BL + H * bw + BR)], width)
+        # drop shadow under the box
+        sh = "class:shadow"
+        for r in range(2, 3 + len(items)):
+            if x + bw + 2 < width:
+                self._overlay_row(screen, r, x + bw + 2, [(sh, " ")], width)
 
     # ── overlays ────────────────────────────────────────────────────────────
     def _draw_overlay(self, screen: list[Fragments], width: int, height: int) -> None:
@@ -433,12 +604,12 @@ class VolkovData:
             self.overlay = ("info", "Repair / check", be.repair_info())
             return
         cur = self.panel.current
-        if cur is not None and cur.kind == "mla" and hasattr(be, "path_of"):
+        if cur is not None and cur.kind == "mla":
             try:
-                probe = vc.MlaBackend(be.path_of(cur))
+                probe = be.enter(cur)  # opens the .mla as a fresh MlaBackend
                 rows = probe.repair_info()
                 probe.close()
-            except vc.BackendError as exc:
+            except (vc.BackendError, AttributeError) as exc:
                 self.overlay = ("message", "Error", str(exc))
                 return
             self.overlay = ("info", "Repair / check", rows)
@@ -540,6 +711,10 @@ class VolkovData:
     def _build_app(self) -> Application:
         style = Style.from_dict({
             "menu": "bg:#00aaaa #000000",
+            "menu-sel": "bg:#000000 #00ffff bold",
+            "menu-border": "bg:#00aaaa #000000",
+            "menu-item": "bg:#00aaaa #000000",
+            "menu-item-sel": "bg:#000000 #00ffff bold",
             "border": "bg:#0000aa #00cccc",
             "border-act": "bg:#0000aa #ffffff bold",
             "title": "bg:#0000aa #00cccc",
@@ -575,7 +750,9 @@ class VolkovData:
         kb = KeyBindings()
         from prompt_toolkit.filters import Condition
         in_overlay = Condition(lambda: self.overlay is not None)
-        no_overlay = ~in_overlay
+        in_menu = Condition(lambda: self.menu is not None)
+        # "browsing": panel has focus — no overlay and no open pull-down menu
+        no_overlay = ~in_overlay & ~in_menu
         typing = Condition(lambda: self.overlay is not None and self.overlay[0] == "input")
         viewing = Condition(lambda: self.overlay is not None and self.overlay[0] == "view")
 
@@ -630,7 +807,29 @@ class VolkovData:
         def _(e): self._do_delete()
 
         @kb.add("f9", filter=no_overlay)
-        def _(e): self.overlay = ("message", "Menu", "The pull-down menu is not implemented yet.")
+        def _(e): self._open_menu()
+
+        # ── pull-down menu navigation ──
+        @kb.add("left", filter=in_menu)
+        def _(e): self._menu_move_col(-1)
+
+        @kb.add("right", filter=in_menu)
+        def _(e): self._menu_move_col(1)
+
+        @kb.add("up", filter=in_menu)
+        def _(e): self._menu_move_row(-1)
+
+        @kb.add("down", filter=in_menu)
+        def _(e): self._menu_move_row(1)
+
+        @kb.add("enter", filter=in_menu)
+        def _(e): self._menu_activate()
+
+        @kb.add("escape", filter=in_menu)
+        def _(e): self.menu = None
+
+        @kb.add("f9", filter=in_menu)
+        def _(e): self.menu = None
 
         @kb.add("q", filter=no_overlay)
         @kb.add("c-q")
