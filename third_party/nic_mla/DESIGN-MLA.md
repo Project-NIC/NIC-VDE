@@ -1,10 +1,10 @@
-# NIC-MLA v2 — Format Design Specification
+# NIC-MLA — Format Design Specification
 
 > **Status:** concept — open questions resolved · **Document version:** 0.6 · **Date:** 2026-05-30
 > **MLA** = *Matroshka Logging Archive* — universal single-file container
 > (data + log in one file, like Matroska / tar / DriveSpace).
 >
-> This document defines v2 format. **Implementation status:** Python reference
+> This document defines the v1.0 format. **Implementation status:** Python reference
 > (`nic_mla.py`, `nic_mla_archive.py`) and C libraries (`c/` — write-only for
 > ATmega + complete for ARM/PC) are ready and byte-identical (verified
 > via cross-compat test C↔Python). Open points requiring decision are in section 9.
@@ -33,7 +33,7 @@ the value is in having them **together and self-describing.**).
 | Arduino 32/64-bit, STM, ESP | write + optionally read | like ATmega + local reading |
 | **Host** (PC / Raspberry) | read, search, edit | loads entire log into RAM, filters, exports |
 
-**Key principle:** writing is trivial and robust (because of ATmega), while all intelligence (searching, querying, editing) runs on the host, where the log is loaded into RAM at once. **There is NO tree/AVL on disk — just a flat log**, which the host scans sequentially. Log fields are designed to make this filtering fast (time, station, channel, type).
+**Key principle:** writing is trivial and robust (because of ATmega), while all intelligence (searching, querying, editing) runs on the host, where the log is loaded into RAM at once. **There is NO tree/AVL on disk — just a flat log**, which the host scans sequentially. Log fields are designed to make this filtering fast (time, station, region, type).
 
 ### Out of scope
 
@@ -48,7 +48,7 @@ the value is in having them **together and self-describing.**).
 
 ## 2. File Layout
 
-We maintain the proven physical model from v1 — **two streams growing toward each other**
+We maintain the proven physical model — **two streams growing toward each other**
 in a fixed-size file:
 
 ```
@@ -61,7 +61,7 @@ offset 0                                                              EOF
 ```
 
 - **DATA** grows up from `data_base` (`top_ptr` = where next block goes).
-- **LOG** (called "index" in v1) grows down from EOF (`bot_ptr`; next record goes
+- **LOG** grows down from EOF (`bot_ptr`; next record goes
   at `bot_ptr − log_rec_size`).
 - Between them is free space filled with `0xFF`.
 - **INDEX** (optional, §5.2) is a fixed region between prefix and data,
@@ -87,7 +87,7 @@ top_ptr + next_block_size  >  bot_ptr − log_rec_size
 
 | Value | Mode | Behavior | Recommendation |
 |---|---|---|---|
-| 0 | **Hard stop** | RuntimeError on full (v1 behavior) | simple |
+| 0 | **Hard stop** | RuntimeError on full | simple |
 | 1 | **File rotation** | on full, next file opens `NIC0001.MLA`, `NIC0002.MLA`, … ; each prefix carries `file_seq` | **recommended for FAT/SD** |
 | 2 | **Circular buffer** | DATA wraps back up, oldest sector is freed (`sector_erase`) and corresponding LOG slots marked as abandoned | RAW/NOR only / experiment |
 
@@ -112,7 +112,7 @@ is deferred (see §9).
 
 ---
 
-## 3. Prefix v2 (512 B)
+## 3. Prefix (512 B)
 
 The prefix remains **exactly 512 B** and ends with CRC16 over bytes `[0..509]`. Version is
 bumped to **2**. All new fields fit into today's zero padding, so
@@ -120,7 +120,7 @@ the serialization and CRC scheme remain identical.
 
 ```
 [0]   magic[4]        b"MLA\0"                                      (unchanged)
-[4]   version         1 B   = 2
+[4]   version         1 B   = 1
 [5]   cluster_shift   1 B   8=256B · 10=1KB · 11=2KB · 12=4KB · 13=8KB
                             · 14=16KB · 15=32KB
 [6]   log_rec_size    1 B   24 (default) or 32 (more stations / longer desc) — §10.1
@@ -144,7 +144,7 @@ the serialization and CRC scheme remain identical.
 
 | Bits | Meaning |
 |---|---|
-| 0–1 | CRC integrity mode: `0=NONE` · `1=DATA` · `2=FULL` (unchanged from v1) |
+| 0–1 | CRC integrity mode: `0=NONE` · `1=DATA` · `2=FULL` |
 | 2–7 | reserved (0) |
 
 > **Note:** buffered / cluster-aligned write mode was **dropped from the design**.
@@ -154,7 +154,7 @@ the serialization and CRC scheme remain identical.
 
 ### Roles in prefix (summary; §1–§10 detail each)
 
-- `cluster_shift`, `flags`: inherited from v1, unchanged behavior
+- `cluster_shift`, `flags`: unchanged behavior
 - `log_rec_size`: chooses record size 24 or 32 B per-file (§10.1)
 - `data_base`, `index_kb`: determine if there's an optional skip-table (§5.2)
 - `container_kind`, `file_seq`: for file rotation (§2, §10.3)
@@ -173,7 +173,7 @@ The `rec_type` field (byte 7 of LOG record, §5) identifies the **semantic type*
 | Hex | Type | Meaning | Payload semantics |
 |---|---|---|---|
 | 0x00 | **RAW** | untyped binary | as-is |
-| 0x01 | **MEASUREMENT** | sensor sample | T°C / °F, pressure, humidity, … (interpretation per `station` + `channel`) |
+| 0x01 | **MEASUREMENT** | sensor sample | T°C / °F, pressure, humidity, … (interpretation per `station` + `region`) |
 | 0x02 | **DIAGNOSTIC** | status / counters | CPU temp, uptime, error count, … |
 | 0x03 | **CONFIG** | configuration blob | persisted settings, thresholds, names |
 | 0x04 | **DELTA** | delta-encoded measurement | diff from previous sample (compression via keyframe) |
@@ -181,7 +181,7 @@ The `rec_type` field (byte 7 of LOG record, §5) identifies the **semantic type*
 | 0x06 | **AGGREGATED** | pre-computed stats | min/max/mean over interval |
 | 0x10–0xFE | reserved / user | — | future / custom per project |
 
-**Note:** The kernel does not interpret these. A `MEASUREMENT` record is still just bytes — *meaning* (which byte is temperature, which is humidity) is determined by the **station+channel metadata**, not by the type byte. The type is a **hint to tools** (export filters, viewers, compression schemes) and to the app itself (recovery uses `RAW` for torn blocks, not from the original type).
+**Note:** The kernel does not interpret these. A `MEASUREMENT` record is still just bytes — *meaning* (which byte is temperature, which is humidity) is determined by the **station+region metadata**, not by the type byte. The type is a **hint to tools** (export filters, viewers, compression schemes) and to the app itself (recovery uses `RAW` for torn blocks, not from the original type).
 
 ### 4.2 Compression (optional, per `rec_type`)
 
@@ -224,7 +224,7 @@ The log record lives in the LOG stream (growing down from EOF). Two sizes per fi
 [5]  rec_type    1 B  encoding (see §4)
 [6]  seq         2 B  uint16 LE  sequence in file (for keyframe backrefs)
 [8]  station     2 B  uint16 LE  station ID
-[10] channel     2 B  uint16 LE  channel within station
+[10] region     2 B  uint16 LE  region within station
 [12] offset      4 B  uint32 LE  byte offset in DATA
 [16] length      2 B  uint16 LE  payload size (max 65535 B)
 [18] kf_back     2 B  uint16 LE  seq distance to keyframe (0 = is keyframe)
@@ -297,12 +297,12 @@ Data payload written to the DATA stream:
 
 ## 7. Crash-safety
 
-Protocol follows v1 spirit — **LOCK first, DATA second**:
+Protocol — **LOCK first, DATA second**:
 
 1. **Torn lock write** (interrupted during LOG record write) → newest slot has bad CRC → skipped at mount. Binary search boundary-finding continues (just steps by 24 instead of 16).
 2. **Torn data write** (LOG OK, but data block incomplete) → missing `MAGIC` →
    slot is abandoned (`flags 0xFF→0x00`) and `top_ptr` reverts to `rec.offset`.
-   This is the key recovery path from v1; only the flags offset changes (13 → 20).
+   This is the key recovery path; the flags byte sits at offset 20.
 3. `recover()`: finds `MAGIC`, tries lengths 1..65535 until `CRC16(payload)` matches. Type is not in the block (it's in the log), so recovered records get `rec_type = raw`. Larger length range makes emergency scan slower, but it runs only on full log corruption.
 4. **Checkpoint (§5.1)** gives mount and recovery a fast catchpoint — from it, only ≤ one interval of records need to be scanned instead of the entire file.
 
@@ -316,7 +316,7 @@ Protocol follows v1 spirit — **LOCK first, DATA second**:
 - commit protocol shape, binary search strategy in `mount`, `__iter__` / `read_record` control, free space / "full" arithmetic
 
 **Modified**
-- `MlaPrefix` — new fields, `version=2`, `index_rec_size` → `log_rec_size=24`;
+- `MlaPrefix` — new fields, `version=1`, `index_rec_size` → `log_rec_size=24`;
   serialization and CRC schema identical
 - `MlaIndex` (→ `MlaLog`) — layout 24 B; `length` to 2 B; new fields `seq`,
   `rec_type`, `kf_back`; `flags` to byte 20; CRC over `[0..19]`
@@ -332,7 +332,7 @@ Protocol follows v1 spirit — **LOCK first, DATA second**:
 - ✓ **file rotation manager** `MlaArchive` (`nic_mla_archive.py`) — next
   `NICnnnn.MLA` on full, self-describing via `file_seq`
 - ✓ **host helper** `query()` (`nic_mla_archive.py`) — flat filtering
-  (time / station / channel / type), PC-only; chip stays lean
+  (time / station / region / type), PC-only; chip stays lean
 - ✓ **index region (§5.2)** — optional host skip-table (`index_kb`);
   `MlaCore.scan()` + `read_index()` in Python, `mla_scan()` in C; write-only path doesn't fill it, just respects `data_base`
 - circular buffer (NOR/experiment) — **deferred to later**
@@ -425,7 +425,7 @@ Optional host skip-table from §5.2. Like `checkpoint_shift`, a compromise:
 
 - **`seq` to 1 byte** — if `seq` is relative to last checkpoint
   (window ≤ 256 records), 0…255 = 1 byte instead of 2. Caveat: affects keyframe compression (`kf_back`), so decide at step 2 implementation.
-- **`station` / `channel`** — if weather station uses only a few channels, consider 1 byte instead of 2 (kept 2 B for multi-station datalogger).
+- **`station` / `region`** — if weather station uses only a few channels, consider 1 byte instead of 2 (kept 2 B for multi-station datalogger).
 - Generally: review each field and shrink to actual need.
 
 ---

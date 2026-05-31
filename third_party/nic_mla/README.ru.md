@@ -2,7 +2,7 @@
   <img src="NICMLA.svg" width="200"/>
 </p>
 
-[Pro dokumentaci v češtině klikněte zde](README_cs.md) | [For documentation in English click here](README.md)
+[Pro dokumentaci v češtině klikněte zde](README.cs.md) | [For documentation in English click here](README.md)
 
 ---
 # NIC-MLA
@@ -18,7 +18,7 @@
 Один файл, один формат, один способ чтения — вынул карту из устройства, вставил
 в компьютер и получил всё. Никакого зоопарка форматов.
 
-> Полная спецификация формата (v2): **[`DESIGN-MLA-v2.md`](DESIGN-MLA-v2.md)**
+> Полная спецификация формата: **[`DESIGN-MLA.md`](DESIGN-MLA.md)**
 
 ## Ключевые особенности
 
@@ -68,7 +68,7 @@
 | `nic_mla_test.py` | Набор тестов (Python) |
 | `c/` | Библиотеки на C: только запись (МК) + полная (ARM/ПК) + адаптеры HAL |
 | `experimental/` | Заморожено / чисто теоретическое (симулятор raw SPI-NOR) |
-| `DESIGN-MLA-v2.md` | Проектная спецификация формата v2 |
+| `DESIGN-MLA.md` | Проектная спецификация формата |
 
 ## Быстрый старт — Python
 

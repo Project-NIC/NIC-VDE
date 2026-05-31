@@ -1,6 +1,6 @@
 # NIC-MLA — C knihovny
 
-Dvě C implementace formátu **NIC-MLA v2**, sdílející jednu definici
+Dvě C implementace formátu **NIC-MLA**, sdílející jednu definici
 (`nic_mla_format.h`). Binárně **shodné s Python referencí** (ověřeno cross-compat
 testem: C zápis ↔ Python čtení).
 

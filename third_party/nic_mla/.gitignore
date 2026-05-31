@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# MLA testovací artefakty
+*.mla
+*.bin
+
+# C build artefakty
+*.o
+*.out
+c/mlatest
+mlatest

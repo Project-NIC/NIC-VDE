@@ -2,7 +2,7 @@
   <img src="NICMLA.svg" width="200"/>
 </p>
 
-[Pro dokumentaci v češtině klikněte zde](README_cs.md) | [Для документации на русском языке нажмите здесь](README_ru.md)
+[Pro dokumentaci v češtině klikněte zde](README.cs.md) | [Для документации на русском языке нажмите здесь](README.ru.md)
 
 ---
 
@@ -20,7 +20,7 @@ file**, readable across platforms from an 8-bit microcontroller to a PC.
 One file, one format, one way to read it — pull the card out of the device, plug
 it into a computer, and you have everything. No zoo of formats.
 
-> Full format specification (v2): **[`DESIGN-MLA-v2.md`](DESIGN-MLA-v2.md)**
+> Full format specification: **[`DESIGN-MLA.md`](DESIGN-MLA.md)**
 
 ## Key features
 
@@ -68,7 +68,7 @@ offset 0                                                              EOF
 | `nic_mla_test.py` | Test suite (Python) |
 | `c/` | C libraries: write-only (MCU) + complete (ARM/PC) + HAL adapters |
 | `experimental/` | Frozen / purely theoretical (raw SPI-NOR simulator) |
-| `DESIGN-MLA-v2.md` | Format design specification v2 |
+| `DESIGN-MLA.md` | Format design specification |
 
 ## Quick start — Python
 

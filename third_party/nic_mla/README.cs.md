@@ -2,7 +2,7 @@
   <img src="NICMLA.svg" width="200"/>
 </p>
 
-[For documentation in English click here](README.md) | [Для документации на русском языке нажмите здесь](README_ru.md)
+[For documentation in English click here](README.md) | [Для документации на русском языке нажмите здесь](README.ru.md)
 
 ---
 # NIC-MLA
@@ -14,7 +14,7 @@ napříč platformami od 8bitového mikrokontroléru po PC.
 Jeden soubor, jeden formát, jeden způsob čtení — vytáhneš kartu ze zařízení,
 strčíš do počítače a máš všechno. Žádný zoo formátů.
 
-> Plná specifikace formátu v2: **[`DESIGN-MLA-v2.md`](DESIGN-MLA-v2.md)**
+> Plná specifikace formátu: **[`DESIGN-MLA.md`](DESIGN-MLA.md)**
 
 ## Hlavní vlastnosti
 
@@ -56,7 +56,7 @@ offset 0                                                        EOF
 | `nic_mla_test.py` | Testovací sada (Python) |
 | `c/` | C knihovny: write-only (MCU) + kompletní (ARM/PC) + HAL adaptéry |
 | `experimental/` | Zamrzlé / čistě teoretické (raw SPI-NOR simulátor) |
-| `DESIGN-MLA-v2.md` | Návrhová specifikace formátu v2 |
+| `DESIGN-MLA.md` | Návrhová specifikace formátu |
 
 ## Rychlý start — Python
 

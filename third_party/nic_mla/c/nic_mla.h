@@ -3,7 +3,7 @@
  *
  * For more capable platforms (ARM Arduino — SAMD/STM32/Teensy/ESP, PC).
  * Full functionality: format / mount / append / read_record / foreach+query /
- * recover. Same binary format v2 as Python and the write-only library.
+ * recover. Same binary format as Python and the write-only library.
  *
  * (File rotation and the compression method are outside this core — rotation is
  *  platform glue over the filesystem, compression is separate.)
@@ -43,7 +43,7 @@ int mla_mount(mla_t *m, mla_hal_t hal);
 
 /* ── Write ──────────────────────────────────────────────────────────────── */
 int mla_append(mla_t *m, uint32_t timestamp,
-               uint16_t station, uint16_t channel,
+               uint16_t station, uint16_t region,
                const uint8_t *data, uint16_t len,
                uint8_t rec_type, uint16_t kf_back);
 
@@ -61,7 +61,7 @@ int mla_read_record(mla_t *m, uint32_t index, mla_log_t *rec_out,
 typedef struct {
     uint8_t  has_time;     uint32_t time_from, time_to;
     uint8_t  has_station;  uint16_t station;
-    uint8_t  has_channel;  uint16_t channel;
+    uint8_t  has_channel;  uint16_t region;
     uint8_t  has_rec_type; uint8_t  rec_type;
     uint8_t  has_enc;      uint8_t  enc;     /* low nibble of rec_type */
 } mla_filter_t;

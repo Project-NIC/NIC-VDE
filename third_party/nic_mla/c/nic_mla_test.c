@@ -91,10 +91,10 @@ int main(int argc, char **argv) {
         { int cnt = 0; mla_foreach(&m2, NULL, count_cb, &cnt);
           check("foreach returns 200 data records", cnt == N); }
         { int cnt = 0; mla_filter_t f; memset(&f, 0, sizeof(f));
-          f.has_channel = 1; f.channel = 3;
+          f.has_channel = 1; f.region = 3;
           mla_foreach(&m2, &f, count_cb, &cnt);
           /* channels i%7==3 → i=3,10,17,...,199 → 29 */
-          check("query channel=3", cnt == 29); }
+          check("query region=3", cnt == 29); }
 
         /* index-accelerated scan must equal a brute-force foreach over the same
          * time window, and must actually seek past slot 0 for a late window */
@@ -118,7 +118,7 @@ int main(int argc, char **argv) {
         mla_append(&m, 0, 1, 0, good, 4, MLA_ENC_RAW, 0);
         torn_off = m.top_ptr;
         /* write only the lock for the next slot, leave the data 0xFF */
-        lk.timestamp=1; lk.offset=torn_off; lk.station=2; lk.channel=9;
+        lk.timestamp=1; lk.offset=torn_off; lk.station=2; lk.region=9;
         lk.seq=1; lk.rec_type=MLA_ENC_RAW; lk.length=20; lk.kf_back=0;
         lk.reserved=0; lk.flags=MLA_FLAG_LIVE;
         mla_log_build(lb, &lk);

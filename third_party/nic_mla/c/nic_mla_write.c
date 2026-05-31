@@ -4,15 +4,19 @@
  */
 #include "nic_mla_write.h"
 
-int mla_w_format(mla_writer_t *w, mla_hal_t hal,
-                 uint32_t file_size, uint8_t crc_mode,
-                 uint8_t cluster_shift, uint8_t checkpoint_shift,
-                 uint8_t keyframe_intv) {
+int mla_w_format_ex(mla_writer_t *w, mla_hal_t hal,
+                    uint32_t file_size, uint8_t crc_mode,
+                    uint8_t cluster_shift, uint8_t checkpoint_shift,
+                    uint8_t keyframe_intv,
+                    const uint8_t *table, uint16_t table_len) {
     uint8_t  hdr[MLA_PFX_HDR_SIZE];
     uint8_t  zero[32];
     mla_prefix_t p;
     uint16_t crc, n;
     uint32_t pos;
+
+    if (table == 0) table_len = 0;
+    if (table_len > MLA_SCHEMA_MAX) return MLA_E_RANGE;
 
     w->hal             = hal;
     w->file_size       = file_size;
@@ -35,14 +39,18 @@ int mla_w_format(mla_writer_t *w, mla_hal_t hal,
     p.checkpoint_shift = checkpoint_shift;
     mla_prefix_build_hdr(hdr, &p);
 
+    /* CRC over [0..509]: header, then the schema table, then zero padding */
     crc = mla_crc16_ex(0xFFFFu, hdr, MLA_PFX_HDR_SIZE);
+    if (table_len) crc = mla_crc16_ex(crc, table, table_len);
     memset(zero, 0, sizeof(zero));
-    { uint16_t rem = (uint16_t)(510u - MLA_PFX_HDR_SIZE);
+    { uint16_t rem = (uint16_t)(510u - MLA_PFX_HDR_SIZE - table_len);
       while (rem) { n = rem < sizeof(zero) ? rem : (uint16_t)sizeof(zero);
                     crc = mla_crc16_ex(crc, zero, n); rem = (uint16_t)(rem - n); } }
 
     if (w->hal.write(w->hal.ctx, 0, hdr, MLA_PFX_HDR_SIZE) != 0) return MLA_E_IO;
-    pos = MLA_PFX_HDR_SIZE;
+    if (table_len &&
+        w->hal.write(w->hal.ctx, MLA_SCHEMA_OFF, table, table_len) != 0) return MLA_E_IO;
+    pos = (uint32_t)MLA_PFX_HDR_SIZE + table_len;
     while (pos < 510u) {
         n = (uint16_t)((510u - pos) < sizeof(zero) ? (510u - pos) : sizeof(zero));
         if (w->hal.write(w->hal.ctx, pos, zero, n) != 0) return MLA_E_IO;
@@ -57,6 +65,14 @@ int mla_w_format(mla_writer_t *w, mla_hal_t hal,
     w->count   = 0;
     w->seq     = 0;
     return MLA_OK;
+}
+
+int mla_w_format(mla_writer_t *w, mla_hal_t hal,
+                 uint32_t file_size, uint8_t crc_mode,
+                 uint8_t cluster_shift, uint8_t checkpoint_shift,
+                 uint8_t keyframe_intv) {
+    return mla_w_format_ex(w, hal, file_size, crc_mode, cluster_shift,
+                           checkpoint_shift, keyframe_intv, 0, 0);
 }
 
 /* ── verify the prefix by streaming + load its fields ───────────────────── */
@@ -133,7 +149,7 @@ int mla_w_mount(mla_writer_t *w, mla_hal_t hal) {
         for (s = lo; s-- > 0; ) {
             if (w->hal.read(w->hal.ctx, fs - (s + 1) * rs, rec_buf, rs) != 0) return MLA_E_IO;
             if (mla_log_parse(rec_buf, &rec) && mla_log_is_live(&rec) && mla_log_is_checkpoint(&rec)) {
-                count    = ((uint32_t)rec.station << 16) | rec.channel;
+                count    = ((uint32_t)rec.station << 16) | rec.region;
                 top      = rec.offset;
                 last_seq = rec.seq;
                 start_slot = s + 1;
@@ -151,7 +167,7 @@ int mla_w_mount(mla_writer_t *w, mla_hal_t hal) {
         if (!mla_log_parse(rec_buf, &rec)) continue;     /* torn lock */
         last_seq = rec.seq;
         if (mla_log_is_checkpoint(&rec)) {
-            count = ((uint32_t)rec.station << 16) | rec.channel;
+            count = ((uint32_t)rec.station << 16) | rec.region;
             top   = rec.offset;
             continue;
         }
@@ -190,7 +206,7 @@ static int write_checkpoint(mla_writer_t *w, uint32_t timestamp) {
     cp.timestamp = timestamp;
     cp.offset    = w->top_ptr;
     cp.station   = (uint16_t)((w->count >> 16) & 0xFFFF);
-    cp.channel   = (uint16_t)(w->count & 0xFFFF);
+    cp.region   = (uint16_t)(w->count & 0xFFFF);
     cp.seq       = w->seq;
     cp.rec_type  = MLA_REC_CHECKPOINT;
     cp.length    = 0;
@@ -204,7 +220,7 @@ static int write_checkpoint(mla_writer_t *w, uint32_t timestamp) {
 }
 
 int mla_w_append(mla_writer_t *w, uint32_t timestamp,
-                 uint16_t station, uint16_t channel,
+                 uint16_t station, uint16_t region,
                  const uint8_t *data, uint16_t len,
                  uint8_t rec_type, uint16_t kf_back) {
     uint32_t block_sz, new_bot;
@@ -221,7 +237,7 @@ int mla_w_append(mla_writer_t *w, uint32_t timestamp,
 
     /* Step 1 — lock */
     r.timestamp = timestamp; r.offset = w->top_ptr;
-    r.station = station; r.channel = channel;
+    r.station = station; r.region = region;
     r.seq = w->seq; r.rec_type = rec_type; r.length = len; r.kf_back = kf_back;
     r.reserved = 0; r.flags = MLA_FLAG_LIVE;
     mla_log_build(lock, &r);

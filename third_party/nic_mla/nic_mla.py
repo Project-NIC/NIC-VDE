@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NIC-MLA  —  Matroshka Logging Archive
-Core  —  Python reference implementation  (format v2)
+Core  —  Python reference implementation  (format v1.0)
 
 File format:
   [PREFIX 512 B][DATA →][   free space 0xFF   ][← LOG][EOF]
@@ -13,13 +13,14 @@ Full = top_ptr + next_block > bot_ptr - log_rec_size.
 Commit protocol: LOG (lock) first, DATA second.
 A valid lock = commit token; a torn write is safely repaired on mount.
 
-What's new in v2 vs v1:
-  • LOG record 24 B (was 16 B): + seq, rec_type, kf_back; length is 2 B.
+Format highlights:
+  • LOG record 24 B: timestamp, station, region, offset, length, rec_type, flags.
   • Data block WITHOUT a TYPE byte — just MAGIC + data + CRC (type lives in the log).
   • Checkpoint — a special log record every 2^checkpoint_shift records;
     speeds up mount and provides an anchor point after a power loss.
-  • Prefix v2 — new fields (container_kind, file_seq, keyframe_intv, enc_caps,
-    data_base, region_end, checkpoint_shift).
+  • Prefix carries a self-describing schema table (see tools/mla_schema.py),
+    container_kind, file_seq, keyframe_intv, enc_caps, data_base, region_end,
+    checkpoint_shift.
 
 Python 3.10+   |   MIT   |   ★ Viva La Resistánce ★
 """
@@ -38,11 +39,43 @@ from typing import Iterator
 
 MLA_MAGIC          = b"MLA\x00"        # 4 B — prefix identifier
 MLA_DATA_MAGIC     = bytes([0xAB, 0xCD])  # 2 B — sync word of every data block
-MLA_VERSION        = 2
-MLA_PREFIX_SIZE    = 512               # B — prefix is always 512 B
-MLA_LOG_REC_SIZE   = 24                # B — log record (lock) in v2
+MLA_VERSION        = 1
+MLA_PREFIX_SIZE    = 512               # B — base prefix block (grows in 512 B steps for a big schema)
+MLA_LOG_REC_SIZE   = 24                # B — log record (lock)
 MLA_INDEX_REC_SIZE = MLA_LOG_REC_SIZE  # backward-compatible alias
 MLA_DEFAULT_SIZE   = 1 << 20           # 1 MB — default file size
+
+# Self-describing schema/decode table — embedded in the prefix free space,
+# covered by the prefix CRC. Built/read by tools/mla_schema.py (host-only).
+MLA_SCHEMA_OFF     = 34                # = end of the structured prefix header
+MLA_SCHEMA_MAX     = 510 - MLA_SCHEMA_OFF  # 476 — fits a single 512 B prefix
+MLA_SCHEMA_VER     = 1                 # the one and only schema table version
+MLA_SCHEMA_FIELD   = 14                # bytes per field descriptor (6 core + 8 name)
+MLA_PREFIX_MAX     = 8 * MLA_PREFIX_SIZE   # 4 KB / 8 sectors — hard ceiling for the prefix
+                                       # (fits the format max of 255 data fields)
+
+
+def _prefix_byte_len(schema_len: int) -> int:
+    """Total prefix size for a schema of `schema_len` bytes (CRC included).
+
+    Normally 512 B (schema fits [34..510), CRC at [510]). A schema that
+    overflows grows the prefix in whole 512 B blocks, the CRC moving to the
+    prefix's last 2 bytes. Mirrors prefix_byte_len() in tools/mla_schema.py.
+    """
+    need = MLA_SCHEMA_OFF + schema_len + 2          # header + schema + CRC16
+    if need <= MLA_PREFIX_SIZE:
+        return MLA_PREFIX_SIZE
+    return -(-need // MLA_PREFIX_SIZE) * MLA_PREFIX_SIZE   # round up to 512
+
+
+def _schema_byte_len(raw: bytes) -> int:
+    """Length of the schema table embedded at [34..) (0 if none/empty)."""
+    if len(raw) < MLA_SCHEMA_OFF + 3:
+        return 0
+    if raw[MLA_SCHEMA_OFF] != MLA_SCHEMA_VER:        # 0x00 / 0xFF / other → none
+        return 0
+    n_log, n_data = raw[MLA_SCHEMA_OFF + 1], raw[MLA_SCHEMA_OFF + 2]
+    return 3 + MLA_SCHEMA_FIELD * (n_log + n_data)
 
 # Log record state — byte 20 (OUTSIDE the CRC, may be changed after writing)
 FLAG_LIVE      = 0xFF  # valid, committed record
@@ -82,7 +115,7 @@ REC_CHECKPOINT = CLASS_CHECKPT  # rec_type of a checkpoint (raw encoding)
 #    [4]  slot      4 B  uint32  — log slot index to jump to (enables O(1) seek)
 #    [8]  station   2 B  uint16  — station at the anchor's record (hint)
 #    [10] status    1 B  uint8   — IDX_UNUSED / IDX_LIVE / IDX_DEAD
-#    [11] reserved  1 B  uint8   — 0xFF (future: channel / flags)
+#    [11] reserved  1 B  uint8   — 0xFF (future: region / flags)
 #
 #  status lives outside any CRC so it can be flipped on NOR (0xFF→0xA5 when
 #  written, 0xA5→0x00 to invalidate — both are 1→0 only).
@@ -112,11 +145,11 @@ def crc16(data: bytes, init: int = 0xFFFF) -> int:
 assert crc16(b"123456789") == 0x29B1, "CRC16 self-test FAILED — check the implementation!"
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Prefix (512 B) — v2
+#  Prefix (512 B)
 #
 #  Layout:
 #    [0]   magic[4]         b"MLA\0"
-#    [4]   version          1 B   = 2
+#    [4]   version          1 B   = 1
 #    [5]   cluster_shift    1 B   8=256B raw NOR; 12=4KB FAT/SD; … 15=32KB
 #    [6]   log_rec_size     1 B   24 (default) or 32
 #    [7]   flags            1 B   CRC mode (b0-1) + alignment (b2-3)
@@ -149,19 +182,37 @@ class MlaPrefix:
     file_seq:         int   = 0
     keyframe_intv:    int   = 8
     enc_caps:         int   = 0
-    data_base:        int   = 0   # 0 → computed as MLA_PREFIX_SIZE
+    data_base:        int   = 0   # 0 → computed as the prefix size (>= 512)
     region_end:       int   = 0   # 0 → computed as file_size
     checkpoint_shift: int   = 8   # 2^8 = 256
+    schema_table:     bytes = b""  # self-describing decode table (see tools/mla_schema.py)
 
     def __post_init__(self):
+        if self.size > MLA_PREFIX_MAX:
+            raise ValueError(
+                f"schema needs a {self.size} B prefix, exceeds "
+                f"MLA_PREFIX_MAX={MLA_PREFIX_MAX} ({MLA_PREFIX_MAX // MLA_PREFIX_SIZE} sectors)"
+            )
         if self.data_base == 0:
-            self.data_base = MLA_PREFIX_SIZE
+            self.data_base = self.size
         if self.region_end == 0:
             self.region_end = self.file_size
 
+    @property
+    def size(self) -> int:
+        """Prefix size in bytes — 512, or a larger 512 B multiple if the schema
+        table does not fit (the CRC then lives in the prefix's last 2 bytes)."""
+        return _prefix_byte_len(len(self.schema_table))
+
+    @staticmethod
+    def parse_size(raw: bytes) -> int:
+        """Prefix size implied by the first block (>= 37 B) — for a two-step read."""
+        return _prefix_byte_len(_schema_byte_len(raw))
+
     def to_bytes(self) -> bytes:
-        """Serialize → exactly 512 B (data + padding + trailing CRC16)."""
-        buf = bytearray(510)
+        """Serialize → `size` bytes (header + schema + padding + trailing CRC16)."""
+        size = self.size
+        buf = bytearray(size - 2)
         struct.pack_into(_PFX_FMT1, buf, 0,
                          self.magic, self.version, self.cluster_shift,
                          self.log_rec_size, self.flags,
@@ -170,18 +221,28 @@ class MlaPrefix:
                          self.container_kind, self.file_seq, self.keyframe_intv,
                          self.enc_caps, self.data_base, self.region_end,
                          self.checkpoint_shift)
+        if self.schema_table:                       # embed at [34 .. ), under the CRC
+            buf[MLA_SCHEMA_OFF:MLA_SCHEMA_OFF + len(self.schema_table)] = self.schema_table
         return bytes(buf) + struct.pack("<H", crc16(bytes(buf)))
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> MlaPrefix:
-        """Deserialize. Raises ValueError on a CRC error or a bad magic."""
-        if len(raw) < 512:
+        """Deserialize. Raises ValueError on a CRC error or a bad magic.
+
+        `raw` must hold the whole prefix; for an extended (>512 B) prefix that
+        means more than one block — mount()/recover() read parse_size() bytes.
+        """
+        if len(raw) < MLA_PREFIX_SIZE:
             raise ValueError("Prefix: too short")
-        crc_stored = struct.unpack_from("<H", raw, 510)[0]
-        if crc16(raw[:510]) != crc_stored:
+        size = cls.parse_size(raw)
+        if len(raw) < size:
+            raise ValueError(f"Prefix: need {size} B, got {len(raw)}")
+        body, crc_at = size - 2, size - 2
+        crc_stored = struct.unpack_from("<H", raw, crc_at)[0]
+        if crc16(raw[:body]) != crc_stored:
             raise ValueError(
                 f"Prefix: bad CRC (stored {crc_stored:#06x}, "
-                f"computed {crc16(raw[:510]):#06x})"
+                f"computed {crc16(raw[:body]):#06x})"
             )
         f1 = struct.unpack_from(_PFX_FMT1, raw, 0)
         if f1[0] != MLA_MAGIC:
@@ -192,16 +253,27 @@ class MlaPrefix:
                    file_size=f1[5], phys_addr=f1[6],
                    container_kind=f2[0], file_seq=f2[1], keyframe_intv=f2[2],
                    enc_caps=f2[3], data_base=f2[4], region_end=f2[5],
-                   checkpoint_shift=f2[6])
+                   checkpoint_shift=f2[6], schema_table=cls._extract_schema(raw))
+
+    @staticmethod
+    def _extract_schema(raw: bytes) -> bytes:
+        """Slice the embedded schema table out of the prefix (b"" if none).
+
+        The table is self-sizing: tbl_ver(1) + n_log(1) + n_data(1) + per-field
+        descriptors (14 B each). A tbl_ver byte of 0x00 (zero padding) or 0xFF
+        (fresh medium) means no schema. Parsing/validation is left to
+        tools/mla_schema.read_schema; here we only recover the bytes.
+        """
+        return bytes(raw[MLA_SCHEMA_OFF:MLA_SCHEMA_OFF + _schema_byte_len(raw)])
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  LOG record / Lock (24 B) — v2
+#  LOG record / Lock (24 B)
 #
 #  Layout (little-endian):
 #    [0]  timestamp   4 B  uint32  — Unix seconds; supplied by the caller (RTC/GPS)
 #    [4]  offset      4 B  uint32  — logical offset of the data block
 #    [8]  station     2 B  uint16
-#    [10] channel     2 B  uint16
+#    [10] region     2 B  uint16
 #    [12] seq         2 B  uint16  — monotonic order within the file
 #    [14] rec_type    1 B  uint8   — data type (encoding + class)
 #    [15] length      2 B  uint16  — data length 1..65535 (0 for a checkpoint)
@@ -224,7 +296,7 @@ class MlaLog:
     timestamp: int
     offset:    int
     station:   int
-    channel:   int
+    region:   int
     seq:       int = 0
     rec_type:  int = ENC_RAW
     length:    int = 0
@@ -236,7 +308,7 @@ class MlaLog:
         """Serialize → exactly 24 B."""
         body = struct.pack(_LOG_FMT,
                            self.timestamp, self.offset,
-                           self.station, self.channel,
+                           self.station, self.region,
                            self.seq, self.rec_type, self.length,
                            self.kf_back, self.reserved)
         return (body
@@ -250,7 +322,7 @@ class MlaLog:
         flags      = raw[20]
         crc_stored = struct.unpack_from("<H", raw, 22)[0]
         crc_ok = crc16(raw[:_LOG_CRC_LEN]) == crc_stored
-        return cls(timestamp=f[0], offset=f[1], station=f[2], channel=f[3],
+        return cls(timestamp=f[0], offset=f[1], station=f[2], region=f[3],
                    seq=f[4], rec_type=f[5], length=f[6], kf_back=f[7],
                    reserved=f[8], flags=flags), crc_ok
 
@@ -273,7 +345,7 @@ class MlaLog:
         return self.offset + 2 + self.length + 2
 
 
-# Backward-compatible alias (v1 name).
+# Backward-compatible alias.
 MlaIndex = MlaLog
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -357,7 +429,7 @@ class MlaCore:
         with hal:
             mla = MlaCore(hal)
             mla.format()                          # first run
-            mla.append(ts, station, channel, data)
+            mla.append(ts, station, region, data)
             for rec, payload in mla:
                 process(rec, payload)
 
@@ -386,6 +458,11 @@ class MlaCore:
         return self._prefix.log_rec_size if self._prefix else MLA_LOG_REC_SIZE
 
     @property
+    def _pfx_size(self) -> int:
+        """Actual prefix size (512, or larger if an oversized schema grew it)."""
+        return self._prefix.size if self._prefix else MLA_PREFIX_SIZE
+
+    @property
     def _data_base(self) -> int:
         """First byte of the data region (after the prefix + optional index region)."""
         return self._prefix.data_base if self._prefix else MLA_PREFIX_SIZE
@@ -393,7 +470,7 @@ class MlaCore:
     @property
     def _idx_capacity(self) -> int:
         """How many index anchors fit in the reserved region (0 = index disabled)."""
-        return (self._data_base - MLA_PREFIX_SIZE) // MLA_IDX_REC_SIZE
+        return (self._data_base - self._pfx_size) // MLA_IDX_REC_SIZE
 
     @property
     def record_count(self) -> int:
@@ -422,7 +499,8 @@ class MlaCore:
                keyframe_intv:    int = 8,
                container_kind:   int = 0,
                file_seq:         int = 0,
-               index_kb:         int = 0) -> None:
+               index_kb:         int = 0,
+               schema_table:     bytes = b"") -> None:
         """
         Initialize a new file — writes the prefix, the rest stays 0xFF (ensured by create()).
         Call only once on a fresh medium.
@@ -431,19 +509,24 @@ class MlaCore:
         time/station skip-table (0 = disabled, format byte-identical to before).
         Capable platforms (STM32/ESP/PC) typically pass index_kb=4; the write-only
         ATmega path leaves it 0 and just appends.
+
+        schema_table — optional self-describing decode table (see tools/mla_schema.py)
+        embedded in the prefix free space, covered by the prefix CRC. Lets the host
+        export records with no prior knowledge; matches what the C library writes
+        via mla_w_format_ex(). Empty = no schema (byte-identical to before).
         """
         if log_rec_size != MLA_LOG_REC_SIZE:
             raise NotImplementedError(
                 "The reference implementation currently supports only log_rec_size=24. "
                 "The layout of the 32 B variant is still being finalized (see spec §10.1)."
             )
-        data_base = MLA_PREFIX_SIZE + index_kb * 1024
+        data_base = _prefix_byte_len(len(schema_table)) + index_kb * 1024
         self._prefix = MlaPrefix(
             file_size=file_size, cluster_shift=cluster_shift,
             log_rec_size=log_rec_size, flags=crc_mode, phys_addr=phys_addr,
             checkpoint_shift=checkpoint_shift, keyframe_intv=keyframe_intv,
             container_kind=container_kind, file_seq=file_seq,
-            data_base=data_base,
+            data_base=data_base, schema_table=schema_table,
         )
         self._hal.write(0, self._prefix.to_bytes())
         self._hal.sync()
@@ -455,6 +538,14 @@ class MlaCore:
         self._idx_n   = 0
 
     # ── Mount ──────────────────────────────────────────────────────────────────
+
+    def _read_prefix(self) -> MlaPrefix:
+        """Read and verify the prefix, fetching extra blocks if it is extended."""
+        first = self._hal.read(0, MLA_PREFIX_SIZE)
+        size  = MlaPrefix.parse_size(first)
+        raw   = first if size <= MLA_PREFIX_SIZE else \
+            first + self._hal.read(MLA_PREFIX_SIZE, size - MLA_PREFIX_SIZE)
+        return MlaPrefix.from_bytes(raw)
 
     def mount(self) -> None:
         """
@@ -471,8 +562,7 @@ class MlaCore:
              - ABANDONED → torn data write (lock OK, data missing); do not count.
              - LIVE      → verify the MAGIC; if missing, abandon it and return top_ptr.
         """
-        raw = self._hal.read(0, MLA_PREFIX_SIZE)
-        self._prefix = MlaPrefix.from_bytes(raw)
+        self._prefix = self._read_prefix()
         fs = self._prefix.file_size
         rs = self._prefix.log_rec_size
         db = self._prefix.data_base
@@ -507,7 +597,7 @@ class MlaCore:
         for slot in range(lo - 1, -1, -1):
             rec, ok = MlaLog.from_bytes(self._hal.read(fs - (slot + 1) * rs, rs))
             if ok and rec.is_live and rec.is_checkpoint:
-                count    = (rec.station << 16) | rec.channel
+                count    = (rec.station << 16) | rec.region
                 top_ptr  = rec.offset
                 last_seq = rec.seq
                 start_slot = slot + 1
@@ -529,7 +619,7 @@ class MlaCore:
             if rec.is_checkpoint:
                 # (There should be no checkpoint after the newest one, but just
                 #  in case we honor it as an anchor point.)
-                count   = (rec.station << 16) | rec.channel
+                count   = (rec.station << 16) | rec.region
                 top_ptr = rec.offset
                 continue
 
@@ -558,7 +648,7 @@ class MlaCore:
 
     # ── Write ──────────────────────────────────────────────────────────────────
 
-    def append(self, timestamp: int, station: int, channel: int,
+    def append(self, timestamp: int, station: int, region: int,
                data: bytes, rec_type: int = ENC_RAW, kf_back: int = 0) -> None:
         """
         Append a data record. Commit protocol: LOCK first, DATA second.
@@ -592,7 +682,7 @@ class MlaCore:
 
         # Step 1 — lock
         lock = MlaLog(timestamp=timestamp, offset=self._top_ptr,
-                      station=station, channel=channel,
+                      station=station, region=region,
                       seq=self._seq & 0xFFFF, rec_type=rec_type,
                       length=n, kf_back=kf_back)
         self._hal.write(new_bot, lock.to_bytes())
@@ -626,7 +716,7 @@ class MlaCore:
             return  # no room — the checkpoint is optional
         cp = MlaLog(timestamp=timestamp, offset=self._top_ptr,
                     station=(self._count >> 16) & 0xFFFF,
-                    channel=self._count & 0xFFFF,
+                    region=self._count & 0xFFFF,
                     seq=self._seq & 0xFFFF, rec_type=REC_CHECKPOINT,
                     length=0, kf_back=0)
         self._hal.write(new_bot, cp.to_bytes())
@@ -643,7 +733,7 @@ class MlaCore:
         cap = self._idx_capacity
         n = 0
         for i in range(cap):
-            status = self._hal.read(MLA_PREFIX_SIZE + i * MLA_IDX_REC_SIZE + 10, 1)[0]
+            status = self._hal.read(self._pfx_size + i * MLA_IDX_REC_SIZE + 10, 1)[0]
             if status == IDX_UNUSED:
                 break
             n += 1
@@ -656,7 +746,7 @@ class MlaCore:
         """
         if self._idx_n >= self._idx_capacity:
             return  # disabled (capacity 0) or region full
-        addr = MLA_PREFIX_SIZE + self._idx_n * MLA_IDX_REC_SIZE
+        addr = self._pfx_size + self._idx_n * MLA_IDX_REC_SIZE
         rec = struct.pack(_IDX_FMT, timestamp & 0xFFFFFFFF, slot & 0xFFFFFFFF,
                           station & 0xFFFF, IDX_LIVE, 0xFF)
         self._hal.write(addr, rec)
@@ -669,7 +759,7 @@ class MlaCore:
         """
         out: list[tuple[int, int, int]] = []
         for i in range(self._idx_n):
-            raw = self._hal.read(MLA_PREFIX_SIZE + i * MLA_IDX_REC_SIZE, MLA_IDX_REC_SIZE)
+            raw = self._hal.read(self._pfx_size + i * MLA_IDX_REC_SIZE, MLA_IDX_REC_SIZE)
             ts, slot, sta, status, _ = struct.unpack(_IDX_FMT, raw)
             if status == IDX_LIVE:
                 out.append((ts, slot, sta))
@@ -764,7 +854,7 @@ class MlaCore:
                 continue  # corrupted data block — skip
 
     def scan(self, *, time_from: int | None = None, time_to: int | None = None,
-             station: int | None = None, channel: int | None = None
+             station: int | None = None, region: int | None = None
              ) -> Iterator[tuple[MlaLog, bytes]]:
         """
         Index-accelerated query. Uses the skip-table to jump near `time_from`,
@@ -779,7 +869,7 @@ class MlaCore:
                 continue
             if station is not None and rec.station != station:
                 continue
-            if channel is not None and rec.channel != channel:
+            if region is not None and rec.region != region:
                 continue
             yield rec, data
 
@@ -801,8 +891,7 @@ class MlaCore:
         NOTE: Requires CRC_DATA or CRC_FULL. Without a CRC the length cannot be
         verified. Slow — emergency use only. Returns the number of recovered records.
         """
-        raw = self._hal.read(0, MLA_PREFIX_SIZE)
-        self._prefix = MlaPrefix.from_bytes(raw)
+        self._prefix = self._read_prefix()
         fs = self._prefix.file_size
         rs = self._prefix.log_rec_size
 
@@ -828,7 +917,7 @@ class MlaCore:
                 crc_s = struct.unpack_from("<H", block, 2 + length)[0]
                 if crc16(data) == crc_s:
                     recovered.append(
-                        MlaLog(timestamp=0, offset=pos, station=0, channel=0,
+                        MlaLog(timestamp=0, offset=pos, station=0, region=0,
                                seq=len(recovered) & 0xFFFF, rec_type=ENC_RAW,
                                length=length)
                     )
@@ -882,7 +971,7 @@ if __name__ == "__main__":
         for i in range(6):
             payload = bytes([i * 10, i * 20, 0xAB, 0xCD, i])  # 5 B
             mla.append(timestamp=int(time.time()) + i,
-                       station=42, channel=i, data=payload)
+                       station=42, region=i, data=payload)
         mla.sync()
         print(f"  Wrote 6 records | free: {mla.free_bytes} B")
 
@@ -894,7 +983,7 @@ if __name__ == "__main__":
 
         for rec, data in mla2:
             print(f"  slot ts={rec.timestamp}  sta={rec.station:3d}"
-                  f"  ch={rec.channel}  seq={rec.seq}  len={rec.length}"
+                  f"  ch={rec.region}  seq={rec.seq}  len={rec.length}"
                   f"  data={data.hex()}")
 
     print("\n── Round-trip verification ──")

@@ -7,8 +7,10 @@ written in Python on **prompt_toolkit**. It browses the local filesystem and
 steps *inside* **NIC-MLA** containers, showing each logged record as a file.
 
 > Status: **working** — two-pane browsing, file operations, file/record viewer,
-> and an MLA backend that browses records. All logic lives in `volkov_core/`
-> (GUI-free) so it can be reused headless.
+> and an MLA backend that browses records. When a container carries a
+> **self-describing schema table** (written by the station), the backend decodes
+> each packed payload into real values + units; CSV/SQL export follows suit. All
+> logic lives in `volkov_core/` (GUI-free) so it can be reused headless.
 
 ## Run
 
@@ -27,7 +29,7 @@ python3 volkov_data.py [left_dir] [right_dir]
 | `F1` | info about the selected item / record |
 | `F2` | repair / check an `.mla` container (flags damaged records) |
 | `F3` | view file or record payload (text/hex) |
-| `F4` | view a record with its decoded value |
+| `F4` | view a record with its decoded value(s) + units (schema-aware) |
 | `F5` | copy selected file to the other panel |
 | `F6` | rename or move — inside an `.mla`, export all records to CSV |
 | `F7` | make directory |
@@ -56,14 +58,17 @@ volkov_data.py           prompt_toolkit GUI (thin shell over volkov_core)
 volkov_core/             GUI-free logic — reusable headless
   backend.py               storage-backend abstraction (Entry / Backend)
   local.py                 LocalBackend — host filesystem
-  mla.py                   MlaBackend — records inside an .mla as "files"
-samples/make_sample.py   generator for a sample weather datalogger file
-samples/weather.mla      committed sample (~549 records) to develop against
+  mla.py                   MlaBackend — records inside an .mla as "files",
+                           schema-aware value decoding + CSV/SQL export
+samples/make_sample.py   generator for a self-describing sample datalogger file
+samples/weather.mla      committed sample (packed rows + schema) to develop against
 tests/                   stdlib unittest suite for volkov_core (GUI-free)
 third_party/nic_mla/     vendored NIC-MLA — canonical data format (Python + C + spec)
+  tools/mla_schema.py      host-only schema-table builder + reader (VDE links this)
 docs/vc-reference/       original Volkov Commander sources (BSD-2) as a UI reference
 ```
 
 The desktop reads the logger format through MLA's Python reference
-(`third_party/nic_mla/nic_mla.py`), kept byte-identical to its C core. The
+(`third_party/nic_mla/nic_mla.py`) and decodes payloads via the host-only schema
+reader (`tools/mla_schema.py`), both kept byte-identical to the C core. The
 Volkov Commander sources are a **behavior reference only** — not ported code.

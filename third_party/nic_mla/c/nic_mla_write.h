@@ -39,13 +39,23 @@ int mla_w_format(mla_writer_t *w, mla_hal_t hal,
                  uint8_t cluster_shift, uint8_t checkpoint_shift,
                  uint8_t keyframe_intv);
 
+/* Same as mla_w_format, but also embeds a self-describing schema table into
+ * the prefix free space (see tools/mla_schema.py + mla_schema_table.{c,h}).
+ * table/table_len may be NULL/0 (then identical to mla_w_format).
+ * Returns MLA_E_RANGE if table_len > MLA_SCHEMA_MAX. */
+int mla_w_format_ex(mla_writer_t *w, mla_hal_t hal,
+                    uint32_t file_size, uint8_t crc_mode,
+                    uint8_t cluster_shift, uint8_t checkpoint_shift,
+                    uint8_t keyframe_intv,
+                    const uint8_t *table, uint16_t table_len);
+
 /* Load an existing container and restore the pointers (after a restart). */
 int mla_w_mount(mla_writer_t *w, mla_hal_t hal);
 
 /* Append a data record. data/len = payload (1..65535). rec_type/kf_back optional.
  * Returns MLA_OK, or MLA_E_FULL / MLA_E_RANGE / MLA_E_IO. */
 int mla_w_append(mla_writer_t *w, uint32_t timestamp,
-                 uint16_t station, uint16_t channel,
+                 uint16_t station, uint16_t region,
                  const uint8_t *data, uint16_t len,
                  uint8_t rec_type, uint16_t kf_back);
 

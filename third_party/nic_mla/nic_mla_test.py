@@ -31,12 +31,16 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # The experimental NOR simulator (frozen) lives in experimental/
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "experimental"))
+# The schema builder/reader (host-only) lives in tools/
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
 
 from nic_mla import (
     MlaCore, MlaPosixHAL, MlaPrefix, MlaLog, MlaIndex,
     crc16, CRC_FULL, CRC_NONE, MLA_PREFIX_SIZE, MLA_LOG_REC_SIZE,
-    MLA_DATA_MAGIC, FLAG_LIVE, FLAG_ABANDONED, REC_CHECKPOINT,
+    MLA_SCHEMA_MAX, MLA_PREFIX_MAX, MLA_DATA_MAGIC,
+    FLAG_LIVE, FLAG_ABANDONED, REC_CHECKPOINT,
 )
+from mla_schema import SchemaBuilder, read_schema, decode_value, decode_payload
 from nic_mla_hal_nor import MlaNorSimHAL
 from nic_mla_archive import MlaArchive, query
 
@@ -121,9 +125,9 @@ def test_prefix():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_index():
-    section("LOG record (lock) — 24 B v2")
+    section("LOG record (lock) — 24 B")
     rec = MlaLog(timestamp=0xDEADBEEF, offset=0x200,
-                 station=7, channel=3, seq=99,
+                 station=7, region=3, seq=99,
                  rec_type=0x12, length=300, kf_back=5)
     raw = rec.to_bytes()
     check("length 24 B", len(raw) == MLA_LOG_REC_SIZE)
@@ -141,7 +145,7 @@ def test_index():
 
     # flags is OUTSIDE the CRC — changing flags must not break the checksum
     raw_mod = bytearray(raw)
-    raw_mod[20] = FLAG_ABANDONED   # byte 20 = flags (v2)
+    raw_mod[20] = FLAG_ABANDONED   # byte 20 = flags
     _, ok_mod = MlaLog.from_bytes(bytes(raw_mod))
     check("flags outside CRC (abandoned still CRC OK)", ok_mod)
 
@@ -152,7 +156,7 @@ def test_index():
     check("bad record CRC detected", not ok_bad)
 
     # A checkpoint is recognized by its rec_type
-    cp = MlaLog(timestamp=1, offset=0x500, station=0, channel=0,
+    cp = MlaLog(timestamp=1, offset=0x500, station=0, region=0,
                 rec_type=REC_CHECKPOINT)
     check("is_checkpoint for REC_CHECKPOINT", cp.is_checkpoint)
     check("a regular record is not a checkpoint", not rec.is_checkpoint)
@@ -204,7 +208,7 @@ def test_roundtrip():
         rec, data = mla2.read_record(0)
         check("timestamp",  rec.timestamp == ts)
         check("station",    rec.station   == sta)
-        check("channel",    rec.channel   == ch)
+        check("region",    rec.region   == ch)
         check("length",     rec.length    == len(payload))
         check("data",       data          == payload)
 
@@ -222,7 +226,7 @@ def test_multiple_records():
         mla = MlaCore(hal)
         mla.format(file_size=_SZ)
         for i in range(N):
-            mla.append(1_000_000 + i, station=1, channel=i,
+            mla.append(1_000_000 + i, station=1, region=i,
                        data=bytes([i] * (4 + i)))  # varying lengths
 
     with MlaPosixHAL(_TMP) as hal2:
@@ -234,7 +238,7 @@ def test_multiple_records():
         records = list(mla2)
         check("iteration returns N records", len(records) == N)
         check("order — oldest first",
-              all(records[i][0].channel == i for i in range(N)))
+              all(records[i][0].region == i for i in range(N)))
         check("order — data matches",
               all(records[i][1] == bytes([i] * (4 + i)) for i in range(N)))
 
@@ -316,7 +320,7 @@ def test_torn_data():
         torn_offset = mla._top_ptr         # where the data should have gone
         torn_len    = 20
         torn_lock = MlaLog(timestamp=1, offset=torn_offset,
-                           station=2, channel=9, length=torn_len)
+                           station=2, region=9, length=torn_len)
         hal.write(mla._bot_ptr - MLA_LOG_REC_SIZE, torn_lock.to_bytes())
         # We do NOT write the data → the region stays 0xFF (torn between lock and data)
 
@@ -422,7 +426,7 @@ def test_nor_end_to_end():
     all_ok = True
     for i, (rec, data) in enumerate(mla2):
         exp_ts, exp_sta, exp_ch, exp_data = records[i]
-        if rec.timestamp != exp_ts or rec.channel != exp_ch or data != exp_data:
+        if rec.timestamp != exp_ts or rec.region != exp_ch or data != exp_data:
             all_ok = False
     check("all data matches after mount", all_ok)
 
@@ -444,7 +448,7 @@ def test_checkpoint():
         mla = MlaCore(hal)
         mla.format(file_size=_SZ, checkpoint_shift=4)  # 2^4 = 64
         for i in range(N):
-            mla.append(1_500_000 + i, station=2, channel=i % 7,
+            mla.append(1_500_000 + i, station=2, region=i % 7,
                        data=bytes([i & 0xFF] * 3))
         check(f"after writing: count={N}", mla.record_count == N)
         # There must be more physical slots than N (data + checkpoints)
@@ -479,7 +483,7 @@ def test_rotation():
         N = 250
         with MlaArchive(d, file_size=2048, checkpoint_shift=4) as arch:
             for i in range(N):
-                arch.append(1_600_000_000 + i, station=1, channel=i % 4,
+                arch.append(1_600_000_000 + i, station=1, region=i % 4,
                             data=bytes([i & 0xFF] * 3))
 
         ro = MlaArchive(d, file_size=2048)
@@ -511,7 +515,7 @@ def test_query():
         mla.format(file_size=_SZ)
         # 30 records: stations 1/2, channels 0..2, times 1000..1029
         for i in range(30):
-            mla.append(1000 + i, station=1 + (i % 2), channel=i % 3,
+            mla.append(1000 + i, station=1 + (i % 2), region=i % 3,
                        data=bytes([i]))
 
     with MlaPosixHAL(_TMP) as hal2:
@@ -522,17 +526,17 @@ def test_query():
         check("filter station=2", all(r.station == 2 for r, _ in by_station)
               and len(by_station) == 15)
 
-        by_channel = list(query(mla2, channel=0))
-        check("filter channel=0", all(r.channel == 0 for r, _ in by_channel)
+        by_channel = list(query(mla2, region=0))
+        check("filter region=0", all(r.region == 0 for r, _ in by_channel)
               and len(by_channel) == 10)
 
         window = list(query(mla2, time_from=1010, time_to=1019))
         check("filter time window [1010,1019]",
               len(window) == 10 and window[0][0].timestamp == 1010)
 
-        combo = list(query(mla2, station=1, channel=0))
-        check("combined filter station=1 & channel=0",
-              all(r.station == 1 and r.channel == 0 for r, _ in combo))
+        combo = list(query(mla2, station=1, region=0))
+        check("combined filter station=1 & region=0",
+              all(r.station == 1 and r.region == 0 for r, _ in combo))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -548,7 +552,7 @@ def test_index_skiptable():
         mla.format(file_size=SZ, index_kb=4, checkpoint_shift=4)  # anchor every 16
         check("data_base shifted past index region", mla._data_base == 512 + 4096)
         for i in range(500):
-            mla.append(1000 + i, station=1 + (i % 3), channel=0, data=bytes([i & 0xFF]))
+            mla.append(1000 + i, station=1 + (i % 3), region=0, data=bytes([i & 0xFF]))
         check("anchors were written", mla._idx_n > 0)
 
     with MlaPosixHAL(_TMP) as hal2:
@@ -585,7 +589,7 @@ def test_index_skiptable():
         m.format(file_size=_SZ)  # default index_kb=0
         check("index disabled → data_base == prefix size", m._data_base == MLA_PREFIX_SIZE)
         for i in range(20):
-            m.append(2000 + i, station=1, channel=0, data=bytes([i]))
+            m.append(2000 + i, station=1, region=0, data=bytes([i]))
         got = [r.timestamp for r, _ in m.scan(time_from=2005, time_to=2010)]
         check("scan() works without an index", got == list(range(2005, 2011)))
 
@@ -628,7 +632,7 @@ def test_recovery():
         m = MlaCore(hal3)
         m.format(file_size=SZ, index_kb=4, checkpoint_shift=4, crc_mode=2)
         for i in range(120):
-            m.append(5000 + i, station=1, channel=0, data=bytes([i & 0xFF] * 4))
+            m.append(5000 + i, station=1, region=0, data=bytes([i & 0xFF] * 4))
         bot = m._bot_ptr
         hal3.write(bot, b"\x00" * (SZ - bot))  # wipe the log only
     with MlaPosixHAL(_TMP) as hal4:
@@ -643,6 +647,131 @@ def test_recovery():
         check("scan() returns all recovered records after recovery", len(recs) == 120)
         check("recovered payloads intact after recovery",
               all(recs[i][1] == bytes([i & 0xFF] * 4) for i in range(120)))
+
+
+def test_schema():
+    section("Self-describing schema — build → embed → read back")
+
+    sb = SchemaBuilder()
+    sb.log("datetime").log("station").log("region")
+    sb.data("temp_in",  unit="degC", width=2, exp10=-1, signed=True, offset=-15)
+    sb.data("humidity", unit="pct",  width=2, exp10=-1)
+    sb.data("energy",   unit="kWh",  width=4)
+    table = sb.table()
+
+    # A5: the Python prefix carries the table (matches what C writes).
+    prefix = MlaPrefix(file_size=_SZ, schema_table=table).to_bytes()
+    check("prefix still 512 B (schema fits)", len(prefix) == 512)
+
+    # A1+A2: read it back — v2 carries 8 B field names on the wire now.
+    log_fields, data_fields = read_schema(prefix)
+    check("read_schema n_log",  log_fields  is not None and len(log_fields)  == 3)
+    check("read_schema n_data", data_fields is not None and len(data_fields) == 3)
+    orig = sb.log_fields + sb.data_fields
+    back = (log_fields or []) + (data_fields or [])
+    check("round-trip descriptors equal",
+          [f.descriptor() for f in orig] == [f.descriptor() for f in back])
+    check("round-trip names recovered",
+          [f.name for f in back] == ["datetime", "station", "region",
+                                     "temp_in", "humidity", "energy"])
+    check("round-trip units decoded",
+          [f.unit for f in back] == ["unix_s", "id", "id", "degC", "pct", "kWh"])
+
+    # A3: decode_value honours width / signedness / offset / exp10.
+    raw = (250).to_bytes(2, "little", signed=True)        # temp_in raw = 250
+    check("decode_value temp_in", abs(decode_value(data_fields[0], raw) - 23.5) < 1e-9)
+
+    # A4: decode_payload splits a packed payload (2 + 2 + 4 = 8 B) and decodes each.
+    payload = (raw
+               + (550).to_bytes(2, "little")              # humidity raw = 550 → 55.0
+               + (1234).to_bytes(4, "little"))            # energy   raw = 1234
+    decoded = decode_payload(data_fields, payload)
+    check("decode_payload field count", len(decoded) == 3)
+    check("decode_payload names/units",
+          [(n, u) for n, u, _ in decoded]
+          == [("temp_in", "degC"), ("humidity", "pct"), ("energy", "kWh")])
+    check("decode_payload values",
+          abs(decoded[0][2] - 23.5) < 1e-9 and abs(decoded[1][2] - 55.0) < 1e-9
+          and decoded[2][2] == 1234)
+    try:
+        decode_payload(data_fields, payload + b"\x00")
+        check("decode_payload rejects wrong length", False, "no ValueError")
+    except ValueError:
+        check("decode_payload rejects wrong length", True)
+
+    # format() embeds the schema; mount() recovers the exact bytes.
+    hal = MlaPosixHAL.create(_TMP, _SZ)
+    with hal:
+        m = MlaCore(hal)
+        m.format(file_size=_SZ, schema_table=table)
+        m.append(1700000000, station=1, region=0, data=payload)
+    with MlaPosixHAL(_TMP) as hal2:
+        m2 = MlaCore(hal2); m2.mount()
+        check("mount() recovers schema bytes", m2._prefix.schema_table == table)
+        recs = list(m2)
+        lf, df = read_schema(m2._prefix.to_bytes())
+        check("end-to-end decode of stored record",
+              len(recs) == 1 and decode_payload(df, recs[0][1])[0][2] == 23.5)
+
+    # A file with no schema → (None, None); format stays byte-identical.
+    plain = MlaPrefix(file_size=_SZ).to_bytes()
+    check("no-schema prefix → (None, None)", read_schema(plain) == (None, None))
+
+
+def test_schema_extended_prefix():
+    section("Schema overflow — prefix grows past 512 B, CRC moves")
+
+    # Build a wide station: enough data fields to overflow the 476 B budget.
+    # Each v2 descriptor is 14 B → ~34 fields fill one block; use 60 to force growth.
+    sb = SchemaBuilder()
+    sb.log("datetime").log("station")
+    for i in range(60):
+        sb.data(f"s{i:02d}", unit="raw", width=1)
+    table = sb.table()
+    psize = sb.prefix_size()
+    check("table overflows one prefix", len(table) > MLA_SCHEMA_MAX)
+    check("prefix grew to a 512 multiple", psize > 512 and psize % 512 == 0)
+
+    prefix = MlaPrefix(file_size=_SZ, schema_table=table).to_bytes()
+    check("extended prefix serialized to psize", len(prefix) == psize)
+    check("CRC sits at the new end", MlaPrefix.from_bytes(prefix).schema_table == table)
+    check("parse_size from first block only",
+          MlaPrefix.parse_size(prefix[:512]) == psize)
+
+    # End-to-end: format() with the oversized schema, then mount() reads it back
+    # and the index region starts after the (extended) prefix, not at 512.
+    hal = MlaPosixHAL.create(_TMP, _SZ)
+    with hal:
+        m = MlaCore(hal)
+        m.format(file_size=_SZ, schema_table=table, index_kb=4)
+        check("data_base accounts for extended prefix",
+              m._prefix.data_base == psize + 4 * 1024)
+        m.append(1700000000, station=1, region=0, data=bytes(range(60)))
+    with MlaPosixHAL(_TMP) as hal2:
+        m2 = MlaCore(hal2); m2.mount()
+        check("mount() of extended-prefix file", m2._prefix.schema_table == table)
+        recs = list(m2)
+        _, df = read_schema(m2._prefix.to_bytes())
+        check("decode wide record",
+              len(recs) == 1 and len(decode_payload(df, recs[0][1])) == 60)
+
+    # Hard ceiling: a schema needing more than MLA_PREFIX_MAX (8 sectors / 4 KB)
+    # is rejected at build time, not silently grown.
+    big = SchemaBuilder()
+    for i in range(40):
+        big.log(f"l{i:02d}", unit="id", width=2)
+    for i in range(255):                      # 255 × 1 B = MLA_DATA_MAX payload
+        big.data(f"d{i:03d}", unit="raw", width=1)
+    try:
+        big.table()
+        check("over-4KB schema rejected (builder)", False, "no ValueError")
+    except ValueError:
+        check("over-4KB schema rejected (builder)", True)
+    try:
+        MlaPrefix(file_size=_SZ, schema_table=bytes(MLA_PREFIX_MAX))  # absurdly large
+        check("over-4KB prefix rejected (MlaPrefix)", False, "no ValueError")
+    except ValueError:
+        check("over-4KB prefix rejected (MlaPrefix)", True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -672,6 +801,8 @@ if __name__ == "__main__":
         test_query()
         test_index_skiptable()
         test_recovery()
+        test_schema()
+        test_schema_extended_prefix()
     finally:
         if os.path.exists(_TMP):
             os.remove(_TMP)

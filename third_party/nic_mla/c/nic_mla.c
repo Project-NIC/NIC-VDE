@@ -157,7 +157,7 @@ int mla_mount(mla_t *m, mla_hal_t hal) {
       for (s = lo; s-- > 0; ) {
           if (m->hal.read(m->hal.ctx, fs - (s + 1) * rs, rec_buf, rs) != 0) return MLA_E_IO;
           if (mla_log_parse(rec_buf, &rec) && mla_log_is_live(&rec) && mla_log_is_checkpoint(&rec)) {
-              count = ((uint32_t)rec.station << 16) | rec.channel;
+              count = ((uint32_t)rec.station << 16) | rec.region;
               top = rec.offset; last_seq = rec.seq; start_slot = s + 1; break;
           }
           if (s == 0) break;
@@ -171,7 +171,7 @@ int mla_mount(mla_t *m, mla_hal_t hal) {
         if (!mla_log_parse(rec_buf, &rec)) continue;
         last_seq = rec.seq;
         if (mla_log_is_checkpoint(&rec)) {
-            count = ((uint32_t)rec.station << 16) | rec.channel;
+            count = ((uint32_t)rec.station << 16) | rec.region;
             top = rec.offset; continue;
         }
         if (mla_log_is_abandoned(&rec)) {
@@ -221,7 +221,7 @@ static int write_checkpoint(mla_t *m, uint32_t timestamp) {
     if (new_bot <= m->top_ptr) return MLA_OK;
     cp.timestamp = timestamp; cp.offset = m->top_ptr;
     cp.station = (uint16_t)((m->count >> 16) & 0xFFFF);
-    cp.channel = (uint16_t)(m->count & 0xFFFF);
+    cp.region = (uint16_t)(m->count & 0xFFFF);
     cp.seq = m->seq; cp.rec_type = MLA_REC_CHECKPOINT;
     cp.length = 0; cp.kf_back = 0; cp.reserved = 0; cp.flags = MLA_FLAG_LIVE;
     mla_log_build(buf, &cp);
@@ -233,7 +233,7 @@ static int write_checkpoint(mla_t *m, uint32_t timestamp) {
 }
 
 int mla_append(mla_t *m, uint32_t timestamp,
-               uint16_t station, uint16_t channel,
+               uint16_t station, uint16_t region,
                const uint8_t *data, uint16_t len,
                uint8_t rec_type, uint16_t kf_back) {
     uint32_t block_sz, new_bot;
@@ -247,7 +247,7 @@ int mla_append(mla_t *m, uint32_t timestamp,
     new_bot = m->bot_ptr - m->log_rec_size;
 
     r.timestamp = timestamp; r.offset = m->top_ptr;
-    r.station = station; r.channel = channel;
+    r.station = station; r.region = region;
     r.seq = m->seq; r.rec_type = rec_type; r.length = len; r.kf_back = kf_back;
     r.reserved = 0; r.flags = MLA_FLAG_LIVE;
     mla_log_build(lock, &r);
@@ -313,7 +313,7 @@ static int filter_match(const mla_filter_t *f, const mla_log_t *r) {
     if (!f) return 1;
     if (f->has_time && (r->timestamp < f->time_from || r->timestamp > f->time_to)) return 0;
     if (f->has_station && r->station != f->station) return 0;
-    if (f->has_channel && r->channel != f->channel) return 0;
+    if (f->has_channel && r->region != f->region) return 0;
     if (f->has_rec_type && r->rec_type != f->rec_type) return 0;
     if (f->has_enc && (r->rec_type & 0x0F) != f->enc) return 0;
     return 1;
@@ -417,7 +417,7 @@ int mla_recover(mla_t *m, mla_hal_t hal, uint32_t *out_count) {
                         uint8_t lb[MLA_LOG_REC_SIZE];
                         uint32_t new_bot = bot - rs;
                         r.timestamp = 0; r.offset = pos;
-                        r.station = 0; r.channel = 0; r.seq = (uint16_t)(m->count & 0xFFFF);
+                        r.station = 0; r.region = 0; r.seq = (uint16_t)(m->count & 0xFFFF);
                         r.rec_type = MLA_ENC_RAW; r.length = (uint16_t)length; r.kf_back = 0;
                         r.reserved = 0; r.flags = MLA_FLAG_LIVE;
                         mla_log_build(lb, &r);
