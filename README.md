@@ -22,12 +22,15 @@ python3 volkov_data.py [left_dir] [right_dir]
 | `Tab` | switch panel |
 | `↑/↓ PgUp/PgDn Home/End` | move cursor |
 | `Enter` | open dir / step into `.mla` / go up (`..`) |
-| `F1` / `F2` | info about the selected item / record |
+| `F1` | info about the selected item / record |
+| `F2` | repair / check an `.mla` container (flags damaged records) |
 | `F3` | view file or record payload (text/hex) |
+| `F4` | view a record with its decoded value |
 | `F5` | copy selected file to the other panel |
-| `F6` | rename |
+| `F6` | rename or move — inside an `.mla`, export all records to CSV |
 | `F7` | make directory |
 | `F8` | delete (with confirmation) |
+| `F9` | pull-down menu (sorting, language, export to SQL, …) |
 | `F10` / `q` / `Ctrl-Q` | quit · `Esc` closes any overlay |
 
 Press `Enter` on `samples/weather.mla` to step inside and browse its records.

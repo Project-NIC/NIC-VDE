@@ -11,8 +11,9 @@ Keys
   ↑/↓ PgUp/PgDn Home/End   move cursor
   Enter          open dir / step into .mla / go up via ".."
   F1 Info        details about the selected item
-  F2 Info        (record info inside MLA — same as F1 there)
+  F2 Repair      check an .mla container and flag damaged records
   F3 View        view file / record payload (text or hex), ESC to close
+  F4 Values      view a record with its decoded value (the conversion table)
   F5 Copy        copy selected file to the other panel
   F6 RenMov      rename in place, or move to the other panel (CSV export in MLA)
   F7 Mkdir       create a directory
@@ -412,7 +413,7 @@ class VolkovData:
         right = ""
         if cur.mtime:
             right = datetime.fromtimestamp(cur.mtime).strftime("%d.%m.%y %H:%M")
-        left = "▶UP--DIR◀" if cur.name == ".." else cur.name
+        left = "Parent directory" if cur.name == ".." else cur.name
         field_w = inner - 2 - len(right) - 1
         return " " + fit(left, field_w) + " " + right + " "
 
@@ -441,8 +442,11 @@ class VolkovData:
         return [("class:cmdline", fit(self.panel.backend.location + ">", width))]
 
     def _fkeybar(self, width: int) -> Fragments:
+        # F6 is dual-purpose: CSV export inside an .mla, rename/move on the disk.
+        # Show the label that actually applies to the active panel.
+        f6 = "CSV" if isinstance(self.panel.backend, vc.MlaBackend) else "RenMov"
         labels = [("1", "Info"), ("2", "Repair"), ("3", "View"), ("4", "Values"),
-                  ("5", "Copy"), ("6", "CSV/Mv"), ("7", "Mkdir"), ("8", "Delete"),
+                  ("5", "Copy"), ("6", f6), ("7", "Mkdir"), ("8", "Delete"),
                   ("9", "Menu"), ("10", "Quit")]
         n = len(labels)
         edge_gap, num_gap = 2, 1
@@ -492,7 +496,12 @@ class VolkovData:
                 self._overlay_row(screen, y + 1 + j, x,
                                   [(bd, DL + DH * bw + DR)], width)
                 continue
-            st = "class:menu-item-sel" if j == cursor else "class:menu-item"
+            if j == cursor:
+                st = "class:menu-item-sel"
+            elif it[1] is None:          # recognised but not implemented → dimmed
+                st = "class:menu-item-dim"
+            else:
+                st = "class:menu-item"
             self._overlay_row(screen, y + 1 + j, x,
                               [(bd, V), (st, fit(" " + label_of(it), bw)), (bd, V)],
                               width)
@@ -545,7 +554,7 @@ class VolkovData:
         if kind == "info":
             rows = self.overlay[2]
             return [(f"{k}: {v}", "class:dlg") for k, v in rows] + \
-                   [("", "class:dlg"), ("[ Esc / Enter to close ]", "class:dlg-dim")]
+                   [("", "class:dlg"), ("[ Enter / Esc = close ]", "class:dlg-dim")]
         if kind == "input":
             _, _title, prompt, buf, _action = self.overlay
             return [(prompt, "class:dlg"),
@@ -559,7 +568,7 @@ class VolkovData:
         if kind == "message":
             body = [(ln, "class:dlg") for ln in self.overlay[2].split("\n")]
             return body + [("", "class:dlg"),
-                           ("[ Esc / Enter to close ]", "class:dlg-dim")]
+                           ("[ Enter / Esc = close ]", "class:dlg-dim")]
         return []
 
     def _overlay_row(self, screen, y, x, frags, width) -> None:
@@ -830,6 +839,7 @@ class VolkovData:
             "menu-border": "bg:#00aaaa #000000",
             "menu-item": "bg:#00aaaa #000000",
             "menu-item-sel": "bg:#000000 #00ffff bold",
+            "menu-item-dim": "bg:#00aaaa #006666",
             "border": "bg:#0000aa #00cccc",
             "border-act": "bg:#0000aa #ffffff bold",
             "title": "bg:#0000aa #00cccc",
