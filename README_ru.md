@@ -1,4 +1,4 @@
-# Volkov Data
+# Volkov Data Ecosystem
 
 [English documentation here](README.md) | [Česká dokumentace zde](README_cs.md)
 
