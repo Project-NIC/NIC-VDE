@@ -32,6 +32,18 @@ python3 volkov_data.py [left_dir] [right_dir]
 
 Press `Enter` on `samples/weather.mla` to step inside and browse its records.
 
+## Tests
+
+The `volkov_core/` logic is GUI-free, so it is covered by a stdlib `unittest`
+suite (no extra dependencies):
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+The tests build throwaway MLA containers on the fly and also smoke-test the
+committed `samples/weather.mla`.
+
 ## Layout
 
 ```
@@ -42,6 +54,7 @@ volkov_core/             GUI-free logic — reusable headless
   mla.py                   MlaBackend — records inside an .mla as "files"
 samples/make_sample.py   generator for a sample weather datalogger file
 samples/weather.mla      committed sample (~549 records) to develop against
+tests/                   stdlib unittest suite for volkov_core (GUI-free)
 third_party/nic_mla/     vendored NIC-MLA — canonical data format (Python + C + spec)
 docs/vc-reference/       original Volkov Commander sources (BSD-2) as a UI reference
 ```
