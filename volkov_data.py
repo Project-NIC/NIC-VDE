@@ -11,9 +11,10 @@ Keys
   ↑/↓ PgUp/PgDn Home/End   move cursor
   Enter          open dir / step into .mla / go up via ".."
   F1 Info        details about the selected item
-  F2 Repair      check an .mla container and flag damaged records
+  F2 Repair      check an .mla container (valid / dead / damaged slots)
   F3 View        view file / record payload (text or hex), ESC to close
-  F4 Values      view a record with its decoded value (the conversion table)
+  F4 Values/Edit on a record → decoded values + units; on ".." inside an
+                 editable .mla → schema/station table editor (↑↓ pick, Enter edit)
   F5 Copy        copy selected file to the other panel
   F6 RenMov      rename in place, or move to the other panel (CSV export in MLA)
   F7 Mkdir       create a directory
@@ -180,11 +181,14 @@ class VolkovData:
         #                | ("input", title, prompt, buffer, action)
         #                | ("confirm", title, message, action)
         #                | ("message", title, message)
+        #                | ("edit", title, rows, cursor)   — schema/station editor
         self.overlay = None
         # pull-down menu state: None when closed, else [col, row] of the cursor
         self.menu = None
         # open one-level submenu: None | (items, cursor, parent_row)
         self.submenu = None
+        # export values as raw on-wire integers (False = decoded physical values)
+        self.export_raw = False
         self.i18n = Translator("en")
         self.app = self._build_app()
 
@@ -224,6 +228,7 @@ class VolkovData:
                 (T("Repair / check"), self._do_repair),
                 (T("View"), self._do_view),
                 (T("Values"), lambda: self._do_view(with_values=True)),
+                (T("Edit schema / stations"), self._open_editor),
                 (T("Copy"), self._do_copy),
                 (T("Rename or move"), self._do_f6),
                 (T("Export to SQL"), self._do_sql),
@@ -244,9 +249,14 @@ class VolkovData:
                 (lang_tick(code) + name, (lambda c=code: self._set_lang(c)))
                 for code, name in LANGUAGES
             ]),
+            (("• " if self.export_raw else "  ") + T("Export raw values"),
+             self._toggle_export_raw),
             None,
             (T("Save setup"), None),
         ]
+
+    def _toggle_export_raw(self) -> None:
+        self.export_raw = not self.export_raw
 
     def _set_lang(self, code: str) -> None:
         self.i18n.set_lang(code)
@@ -569,6 +579,26 @@ class VolkovData:
             body = [(ln, "class:dlg") for ln in self.overlay[2].split("\n")]
             return body + [("", "class:dlg"),
                            ("[ Enter / Esc = close ]", "class:dlg-dim")]
+        if kind == "edit":
+            _, _title, rows, cur = self.overlay
+            maxv = 16
+            start = 0
+            if len(rows) > maxv:
+                start = min(max(0, cur - maxv // 2), len(rows) - maxv)
+            body = []
+            if start > 0:
+                body.append(("  ↑ more …", "class:dlg-dim"))
+            for i in range(start, min(start + maxv, len(rows))):
+                r = rows[i]
+                text = f"{r['label']:<20} = {r['value']}"
+                if i == cur:
+                    body.append(("> " + text, "class:dlg-edit"))
+                else:
+                    body.append(("  " + text, "class:dlg"))
+            if start + maxv < len(rows):
+                body.append(("  ↓ more …", "class:dlg-dim"))
+            return body + [("", "class:dlg"),
+                           ("[ ↑↓ pick   Enter = edit   Esc = close ]", "class:dlg-dim")]
         return []
 
     def _overlay_row(self, screen, y, x, frags, width) -> None:
@@ -632,7 +662,7 @@ class VolkovData:
                     lines.append(f"{k}: {v}")
             except vc.BackendError:
                 pass
-            if with_values:  # F4: decoded value via the conversion table
+            if with_values:  # F4: decoded value(s) via the schema
                 try:
                     lines.append(f"Value: {self.panel.backend.decode_value(cur)}")
                 except Exception:
@@ -702,7 +732,8 @@ class VolkovData:
             name = be.csv_name()
             exists = self.other.backend.exists(name)
             msg = (f"Export all records to CSV\n  to  {self.other.backend.location}"
-                   f"\n  as  '{name}'")
+                   f"\n  as  '{name}'"
+                   f"\n  values: {'raw integers' if self.export_raw else 'translated'}")
             if exists:
                 msg += f"\n\n! '{name}' exists and will be OVERWRITTEN."
             self.overlay = ("confirm", "Export CSV", msg, "csv")
@@ -717,7 +748,8 @@ class VolkovData:
             return
         name = be.sqlite_name()
         msg = (f"Export all records to SQLite\n  to  {self.other.backend.location}"
-               f"\n  as  '{name}'")
+               f"\n  as  '{name}'"
+               f"\n  values: {'raw integers' if self.export_raw else 'translated'}")
         if self.other.backend.exists(name):
             msg += f"\n\n! '{name}' exists and will be OVERWRITTEN."
         self.overlay = ("confirm", "Export SQL", msg, "sql")
@@ -736,6 +768,74 @@ class VolkovData:
         else:
             dest = cur.name
         self.overlay = ("input", "Rename / move", "New name or path:", dest, "renmov")
+
+    # ── F4 schema / station editor (values only; prefix rewritten on save) ────
+    def _do_f4(self) -> None:
+        """F4: editor on the '..' row of an editable .mla, else the value view."""
+        be = self.panel.backend
+        cur = self.panel.current
+        if (isinstance(be, vc.MlaBackend) and (cur is None or cur.name == "..")
+                and be.editable):
+            self._open_editor()
+        else:
+            self._do_view(with_values=True)
+
+    def _open_editor(self) -> None:
+        be = self.panel.backend
+        if not isinstance(be, vc.MlaBackend) or not be.editable:
+            self.overlay = ("message", "Edit",
+                            "Step inside an .mla that carries a schema or "
+                            "station table first.")
+            return
+        self.overlay = ("edit", "Edit schema / stations", self._editor_rows(), 0)
+
+    def _editor_rows(self) -> list:
+        be = self.panel.backend
+        rows = []
+        for fi, f in enumerate(be.schema_view()):
+            for attr in ("name", "unit", "exp10", "offset", "signed"):
+                rows.append({"label": f"{f['name']}.{attr}", "value": str(f[attr]),
+                             "kind": "schema", "fi": fi, "attr": attr})
+        for s in be.station_view():
+            for attr in ("region", "number"):
+                rows.append({"label": f"station{s['index']}.{attr}",
+                             "value": str(s[attr]), "kind": "station",
+                             "si": s["index"] - 1, "attr": attr})
+        return rows
+
+    def _editor_enter(self) -> None:
+        _, _t, rows, cur = self.overlay
+        if not (0 <= cur < len(rows)):
+            return
+        row = rows[cur]
+        self.overlay = ("input", "Edit value", f"{row['label']} = ",
+                        row["value"], ("editval", row, cur))
+
+    def _apply_edit(self, action, buf: str) -> None:
+        _tag, row, cur = action
+        be = self.panel.backend
+        try:
+            val = self._parse_edit_value(row["attr"], buf)
+            if row["kind"] == "schema":
+                be.edit_schema_field(row["fi"], **{row["attr"]: val})
+            else:
+                sv = be.station_view()[row["si"]]
+                kw = {"region": sv["region"], "number": sv["number"], row["attr"]: val}
+                be.edit_station(row["si"], **kw)
+        except (vc.BackendError, ValueError) as exc:
+            self.overlay = ("message", "Error", str(exc))
+            return
+        rows = self._editor_rows()  # back to the editor, fresh values, cursor kept
+        self.overlay = ("edit", "Edit schema / stations", rows, min(cur, len(rows) - 1))
+
+    @staticmethod
+    def _parse_edit_value(attr: str, buf: str):
+        buf = buf.strip()
+        if attr in ("exp10", "offset", "region", "number"):
+            return int(buf)
+        if attr == "signed":
+            return buf.lower() in ("1", "true", "yes", "y", "t")
+        return buf  # name, unit
 
     def _renmov(self, dest: str) -> None:
         """F6: a bare name renames in place; a path moves to the host filesystem."""
@@ -800,6 +900,9 @@ class VolkovData:
         _, _t, _p, buf, action = self.overlay
         buf = buf.strip()
         self.overlay = None
+        if isinstance(action, tuple) and action and action[0] == "editval":
+            self._apply_edit(action, buf)   # sets its own overlay (editor / error)
+            return
         if not buf:
             return
         try:
@@ -822,11 +925,12 @@ class VolkovData:
                 self._copy_now()
             elif action == "csv":
                 be = self.panel.backend
-                self.other.backend.put_file(be.csv_name(), be.to_csv())
+                self.other.backend.put_file(be.csv_name(), be.to_csv(raw=self.export_raw))
                 self.other.reload()
             elif action == "sql":
                 be = self.panel.backend
-                self.other.backend.put_file(be.sqlite_name(), be.to_sqlite())
+                self.other.backend.put_file(be.sqlite_name(),
+                                            be.to_sqlite(raw=self.export_raw))
                 self.other.reload()
         except vc.BackendError as exc:
             self.overlay = ("message", "Error", str(exc))
@@ -880,6 +984,7 @@ class VolkovData:
         no_overlay = ~in_overlay & ~in_menu
         typing = Condition(lambda: self.overlay is not None and self.overlay[0] == "input")
         viewing = Condition(lambda: self.overlay is not None and self.overlay[0] == "view")
+        editing = Condition(lambda: self.overlay is not None and self.overlay[0] == "edit")
 
         # ── navigation (only when no overlay) ──
         @kb.add("tab", filter=no_overlay)
@@ -917,7 +1022,7 @@ class VolkovData:
         def _(e): self._do_view()
 
         @kb.add("f4", filter=no_overlay)
-        def _(e): self._do_view(with_values=True)
+        def _(e): self._do_f4()
 
         @kb.add("f5", filter=no_overlay)
         def _(e): self._do_copy()
@@ -992,6 +1097,17 @@ class VolkovData:
             k, t, l, s = self.overlay
             self.overlay = (k, t, l, min(max(0, len(l) - 1), s + 20))
 
+        # ── schema/station editor navigation ──
+        @kb.add("up", filter=editing)
+        def _(e):
+            k, t, rows, cur = self.overlay
+            self.overlay = (k, t, rows, max(0, cur - 1))
+
+        @kb.add("down", filter=editing)
+        def _(e):
+            k, t, rows, cur = self.overlay
+            self.overlay = (k, t, rows, min(len(rows) - 1, cur + 1))
+
         # ── input typing ──
         @kb.add("<any>", filter=typing)
         def _(e):
@@ -1014,6 +1130,8 @@ class VolkovData:
                 self._commit_input()
             elif kind == "confirm":
                 self._commit_confirm()
+            elif kind == "edit":
+                self._editor_enter()
             else:  # info / message / view
                 self.overlay = None
 

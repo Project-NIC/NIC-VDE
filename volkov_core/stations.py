@@ -39,6 +39,11 @@ class StationMap:
     def present(self) -> bool:
         return bool(self._records)
 
+    @property
+    def records(self) -> list[bytes]:
+        """The raw 6-byte station records (empty list if no table)."""
+        return list(self._records or [])
+
     def resolve(self, index: int) -> tuple[int, int] | None:
         """(region, number) for a log index (1..n); None if absent/out of range."""
         if not self._records or not (1 <= index <= len(self._records)):

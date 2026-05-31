@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import struct
 import sys
+from dataclasses import replace
 from datetime import datetime
 
 from . import export
@@ -32,8 +33,11 @@ for _p in (_MLA_DIR, os.path.join(_MLA_DIR, "tools")):
         sys.path.insert(0, _p)
 
 try:
-    from nic_mla import MlaCore, MlaPosixHAL, MlaLog  # noqa: E402
-    from mla_schema import read_schema, decode_value as _decode_field  # noqa: E402
+    from nic_mla import MlaCore, MlaPosixHAL, MlaLog, MlaPrefix  # noqa: E402
+    from mla_schema import (  # noqa: E402
+        read_schema, decode_value as _decode_field,
+        read_stations, split_station, SchemaBuilder, StationTable,
+    )
 except Exception as exc:  # pragma: no cover - only if vendoring is broken
     raise BackendError(f"NIC-MLA library not available: {exc}") from exc
 
@@ -72,6 +76,7 @@ class MlaBackend(Backend):
         self._parent = parent
         self._records: list[tuple] = []   # [(MlaLog, bytes)]
         self._stations = StationMap(None)  # index → (region, number) glue
+        self._log_fields = None            # schema LOG-header fields (or None)
         self._data_fields = None           # schema DATA-payload fields (or None)
         self._summary: dict = {}
         self._load()
@@ -92,11 +97,11 @@ class MlaBackend(Backend):
         """Pull the self-describing schema + station tables out of the prefix."""
         try:
             raw_prefix = hal.read(0, core._prefix.size)
-            _log_fields, self._data_fields = read_schema(raw_prefix)
+            self._log_fields, self._data_fields = read_schema(raw_prefix)
             self._stations = StationMap.from_prefix(raw_prefix)
         except Exception:
             # an unreadable / unsupported table must not block browsing
-            self._data_fields = None
+            self._log_fields = self._data_fields = None
             self._stations = StationMap(None)
 
     @property
@@ -350,6 +355,94 @@ class MlaBackend(Backend):
                   f"{damaged} committed record(s) with an unreadable data block"
         rows.append(("Verdict", verdict))
         return rows
+
+    # ── schema / station table editing (F4 editor — values only) ──────────────
+    # Editing the prefix tables is allowed (it is NOT appending records): we only
+    # ever change the CONTENT of existing descriptors, never their count, so the
+    # table byte-length and the prefix size stay fixed and the file layout (the
+    # data_base, the records) is never disturbed. The prefix is written back with
+    # a fresh CRC. Adding/removing fields is intentionally out of scope.
+
+    @property
+    def editable(self) -> bool:
+        return bool(self._data_fields) or self._stations.present
+
+    def schema_view(self) -> list[dict]:
+        """Editable view of the DATA schema fields."""
+        return [{"name": f.name, "unit": f.unit, "width": f.width,
+                 "exp10": f.exp10, "signed": f.signed, "offset": f.offset}
+                for f in (self._data_fields or [])]
+
+    def station_view(self) -> list[dict]:
+        """Editable view of the station table (index 1..n → region/number)."""
+        out = []
+        for i, rec in enumerate(self._stations.records, start=1):
+            region, number, _res = split_station(rec)
+            out.append({"index": i, "region": region, "number": number})
+        return out
+
+    def edit_schema_field(self, i: int, **changes) -> None:
+        """Change one DATA field's content (name/unit/exp10/signed/offset)."""
+        fields = list(self._data_fields or [])
+        if not (0 <= i < len(fields)):
+            raise BackendError("No such schema field")
+        bad = set(changes) - {"name", "unit", "exp10", "signed", "offset"}
+        if bad:
+            raise BackendError(f"Cannot edit: {', '.join(sorted(bad))}")
+        try:
+            edited = replace(fields[i], **changes)
+            edited.descriptor()  # validate ranges (width/unit/exp10/offset/name)
+        except (ValueError, TypeError) as exc:
+            raise BackendError(f"Invalid value: {exc}") from exc
+        fields[i] = edited
+        self._rewrite_tables(data_fields=fields)
+
+    def edit_station(self, i: int, *, region: int, number: int) -> None:
+        """Change one station's region/number (0-based i); reserved preserved."""
+        recs = self._stations.records
+        if not (0 <= i < len(recs)):
+            raise BackendError("No such station")
+        _r, _n, reserved = split_station(recs[i])
+        try:
+            st = StationTable()
+            for j, rec in enumerate(recs):
+                if j == i:
+                    st.station(region=region, number=number, reserved=reserved)
+                else:
+                    st.raw(rec)
+            new_station = st.table()
+        except (ValueError, TypeError) as exc:
+            raise BackendError(f"Invalid value: {exc}") from exc
+        self._rewrite_tables(station_table=new_station)
+
+    def _rewrite_tables(self, data_fields=None, station_table=None) -> None:
+        """Write edited schema/station tables back into the prefix (values only).
+
+        Rebuilds the prefix with new table bytes of the SAME length, recomputes
+        its CRC, writes it at offset 0, and reloads. Refuses any change that would
+        resize the prefix (which would move data_base and corrupt the file).
+        """
+        try:
+            with MlaPosixHAL(self.path) as hal:
+                raw = hal.read(0, MlaPrefix.parse_size(hal.read(0, 512)))
+                pfx = MlaPrefix.from_bytes(raw)
+                if data_fields is not None:
+                    sb = SchemaBuilder()
+                    sb.log_fields = list(self._log_fields or [])
+                    sb.data_fields = list(data_fields)
+                    pfx.schema_table = sb.table()
+                if station_table is not None:
+                    pfx.station_table = station_table
+                new = pfx.to_bytes()
+                if len(new) != len(raw):
+                    raise BackendError("edit would resize the prefix — refused")
+                hal.write(0, new)
+                hal.sync()
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(f"Cannot write tables: {exc}") from exc
+        self._load()  # re-read everything from disk
 
     # ── mutating — intentionally limited inside MLA ───────────────────────────
     # By design the MLA container is append-only and crash-safe: the GUI does not

@@ -36,7 +36,7 @@ python3 volkov_data.py [levý_adresář] [pravý_adresář]
 | `F1` | informace o vybrané položce / záznamu |
 | `F2` | kontrola kontejneru `.mla` — počet platných / mrtvých / poškozených slotů |
 | `F3` | zobrazit obsah souboru nebo záznamu (text/hex) |
-| `F4` | zobrazit záznam i s dekódovanými hodnotami a jednotkami (dle schématu) |
+| `F4` | na záznamu: dekódované hodnoty + jednotky · na `..` v editovatelné `.mla`: editor schématu/stanic |
 | `F5` | kopírovat vybraný soubor do druhého panelu |
 | `F6` | přejmenovat nebo přesunout — uvnitř `.mla` export všech záznamů do CSV |
 | `F7` | vytvořit adresář |

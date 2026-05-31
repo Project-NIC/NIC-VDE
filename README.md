@@ -35,7 +35,7 @@ python3 volkov_data.py [left_dir] [right_dir]
 | `F1` | info about the selected item / record |
 | `F2` | check an `.mla` container — report valid / dead / damaged slots |
 | `F3` | view file or record payload (text/hex) |
-| `F4` | view a record with its decoded value(s) + units (schema-aware) |
+| `F4` | on a record: decoded value(s) + units · on `..` inside an editable `.mla`: schema/station table editor |
 | `F5` | copy selected file to the other panel |
 | `F6` | rename or move — inside an `.mla`, export all records to CSV |
 | `F7` | make directory |

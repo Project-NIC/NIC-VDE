@@ -1,5 +1,7 @@
 """Volkov Data core — GUI-free storage/transform logic (reusable headless)."""
 
+__version__ = "1.0"
+
 from .backend import Backend, BackendError, Entry, Unsupported
 from .local import LocalBackend
 from .mla import MlaBackend, rec_type_name

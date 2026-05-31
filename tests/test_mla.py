@@ -203,6 +203,59 @@ class MlaSchemaTests(unittest.TestCase):
             os.remove(tmp)
 
 
+class MlaEditTests(unittest.TestCase):
+    """F4 editor: change schema/station table values in place (prefix CRC redone)."""
+
+    def setUp(self):
+        self.path = make_temp_mla_schema()
+        self.parent = LocalBackend(os.path.dirname(self.path))
+        self.b = MlaBackend(self.path, parent=self.parent)
+
+    def tearDown(self):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def reopen(self):
+        return MlaBackend(self.path, parent=self.parent)
+
+    def first_record(self, b):
+        return [e for e in b.list() if e.kind == "record"][0]
+
+    def test_views(self):
+        self.assertEqual([f["name"] for f in self.b.schema_view()], ["temp", "humidity"])
+        self.assertEqual(self.b.station_view(),
+                         [{"index": 1, "region": 7, "number": 100}])
+
+    def test_edit_schema_scale_persists(self):
+        self.b.edit_schema_field(0, exp10=-2)            # 23.5 → 2.35
+        b2 = self.reopen()
+        self.assertEqual(b2.schema_view()[0]["exp10"], -2)
+        self.assertIn("temp=2.35", b2.decode_value(self.first_record(b2)))
+        # the data records survive the prefix rewrite intact
+        self.assertEqual(len([e for e in b2.list() if e.kind == "record"]), 4)
+
+    def test_edit_schema_name_persists(self):
+        self.b.edit_schema_field(0, name="tempC")
+        self.assertEqual(self.reopen().schema_view()[0]["name"], "tempC")
+
+    def test_edit_station_persists(self):
+        self.b.edit_station(0, region=9, number=999)
+        b2 = self.reopen()
+        self.assertEqual(b2.station_view()[0], {"index": 1, "region": 9, "number": 999})
+        self.assertIn("9/999", self.first_record(b2).name)
+
+    def test_invalid_edits_rejected(self):
+        from volkov_core.backend import BackendError
+        with self.assertRaises(BackendError):
+            self.b.edit_schema_field(0, name="waytoolong")   # > 8 bytes
+        with self.assertRaises(BackendError):
+            self.b.edit_schema_field(9, exp10=0)             # no such field
+        with self.assertRaises(BackendError):
+            self.b.edit_schema_field(0, width=4)             # not an editable attr
+
+
 @unittest.skipUnless(os.path.exists(SAMPLE_MLA), "committed sample weather.mla absent")
 class CommittedSampleTests(unittest.TestCase):
     """Smoke test against the real committed sample."""
