@@ -11,7 +11,7 @@ testem: C zápis ↔ Python čtení).
 | `nic_mla.{h,c}` | **KOMPLETNÍ** — + `read_record` / `foreach`+filtr / `recover` | ARM Arduino (SAMD/STM32/Teensy/ESP), PC |
 
 > **Proč dvě?** ATmega jen zapisuje (à minuty/15 min) a má 2 KB RAM. Write-only
-> knihovna nemá žádnou velkou alokaci (největší buffer na zásobníku = 24 B, prefix
+> knihovna nemá žádnou velkou alokaci (největší buffer na zásobníku = 32 B, prefix
 > se streamuje), takže se vejde i na šváb. Hledání/čtení/obnova běží až na hostu
 > nebo na výkonnějším čipu přes kompletní knihovnu.
 
@@ -60,13 +60,17 @@ mla_writer_t w;
 mla_hal_t hal = my_sd_hal();           /* tvůj HAL nad SdFat/NOR */
 
 /* první spuštění: */
-mla_w_format(&w, hal, 1UL<<20, MLA_CRC_FULL, 12, /*ckpt*/8, /*kf*/8);
+mla_w_format(&w, hal, 1UL<<20, MLA_CRC_FULL, /*cluster*/12, /*kf*/8);
 /* další spuštění (po restartu): */
 mla_w_mount(&w, hal);
 
 uint8_t sample[5] = { temp_lo, temp_hi, hum, 0, batt };
-mla_w_append(&w, unix_time(), /*station*/1, /*channel*/0, sample, 5, MLA_ENC_RAW, 0);
+/* station = 1B index do tabulky stanic v prefixu (0 = žádná) */
+mla_w_append(&w, unix_time(), /*station*/1, sample, 5, MLA_ENC_RAW, 0);
 ```
+
+Tabulky (schema + stanice) z `tools/mla_schema.py` se vloží přes
+`mla_w_format_ex(...)`; jejich obsah knihovna nečte, jen ho zapíše.
 
 ## Čtení / dotaz (kompletní knihovna, host nebo ARM)
 
@@ -78,10 +82,9 @@ mla_t m; mla_mount(&m, hal);
 mla_log_t rec; uint8_t buf[256]; uint16_t len;
 mla_read_record(&m, 0, &rec, buf, sizeof(buf), &len);
 
-/* filtr: jen stanice 1, kanál 0, časové okno */
+/* filtr: jen stanice (index) 1, časové okno */
 mla_filter_t f = {0};
 f.has_station = 1; f.station = 1;
-f.has_channel = 1; f.channel = 0;
 f.has_time = 1; f.time_from = t0; f.time_to = t1;
 mla_foreach(&m, &f, my_callback, my_user_ptr);
 ```
@@ -91,15 +94,15 @@ mla_foreach(&m, &f, my_callback, my_user_ptr);
 ```sh
 cc -std=c99 -Wall -Wextra -O2 nic_mla_test.c nic_mla.c nic_mla_write.c \
    hal/nic_mla_hal_posix.c -o mlatest
-./mlatest /tmp/mla_c_out.bin       # 19/19 PASS; zapíše soubor pro Python cross-check
+./mlatest /tmp/mla_c_out.bin       # 28/28 PASS; zapíše soubor pro Python cross-check
 python3 ../nic_mla.py              # Python umí týž soubor přečíst
 ```
 
 ## Poznámky
 
 - Vše little-endian, serializace po bajtech → nezávislé na endianness/padding.
-- Crash-safety (LOCK first, DATA second + torn-write detekce) je v obou knihovnách.
-- `phys_addr` se podporuje jen v dolních 32 bitech (pro FAT/POSIX = 0).
+- Crash-safety: LOCK first, DATA second; zahození záznamu = přepis na nuly
+  (CRC pak nesedí → čtečka přeskočí). Celý 16 B log záznam je v CRC.
 - Rotace souborů a komprese jsou mimo toto jádro (rotace = platformní lepidlo nad
   FS; komprese = samostatná metoda, kontejner nese přes `rec_type`).
 

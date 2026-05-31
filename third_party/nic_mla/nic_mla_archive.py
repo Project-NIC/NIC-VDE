@@ -30,6 +30,9 @@ from nic_mla import (
     MLA_DEFAULT_SIZE, CRC_FULL, ENC_RAW,
 )
 
+# Station index helper: the log carries a 1-byte station index into the prefix
+# station table. Translation index ↔ real number is the host glue's job.
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  MlaArchive — file rotation
@@ -52,20 +55,21 @@ class MlaArchive:
     _NAME_RE = None  # set in __init__ based on base
 
     def __init__(self, directory: str,
-                 file_size:        int = MLA_DEFAULT_SIZE,
-                 base:             str = "MLA",
-                 digits:           int = 5,
-                 crc_mode:         int = CRC_FULL,
-                 cluster_shift:    int = 12,
-                 checkpoint_shift: int = 8,
-                 keyframe_intv:    int = 8):
+                 file_size:     int = MLA_DEFAULT_SIZE,
+                 base:          str = "MLA",
+                 digits:        int = 5,
+                 crc_mode:      int = CRC_FULL,
+                 cluster_shift: int = 12,
+                 keyframe_intv: int = 8,
+                 schema_table:  bytes = b"",
+                 station_table: bytes = b""):
         self.dir       = directory
         self.base      = base
         self.digits    = digits
         self.file_size = file_size
         self._fmt = dict(crc_mode=crc_mode, cluster_shift=cluster_shift,
-                         checkpoint_shift=checkpoint_shift,
-                         keyframe_intv=keyframe_intv)
+                         keyframe_intv=keyframe_intv,
+                         schema_table=schema_table, station_table=station_table)
         # Aligned with the MCU example (atmega_sd_writeonly.ino): MLA00000.MLA …
         self._NAME_RE = re.compile(rf"{re.escape(base)}(\d{{{digits}}})\.MLA$")
 
@@ -127,16 +131,19 @@ class MlaArchive:
         self._core = None
         self._create_and_format(self._seq)
 
-    def append(self, timestamp: int, station: int, region: int,
-               data: bytes, rec_type: int = ENC_RAW, kf_back: int = 0) -> None:
-        """Append a record; rotate to the next file when the current one fills up."""
+    def append(self, timestamp: int, station: int, data: bytes,
+               rec_type: int = ENC_RAW, kf_back: int = 0) -> None:
+        """Append a record; rotate to the next file when the current one fills up.
+
+        station — 1-byte index into the prefix station table (see MlaCore.append).
+        """
         self._ensure_writer()
         try:
-            self._core.append(timestamp, station, region, data, rec_type, kf_back)
+            self._core.append(timestamp, station, data, rec_type, kf_back)
         except RuntimeError:
             # Current file is full → next one in sequence and retry.
             self._rotate()
-            self._core.append(timestamp, station, region, data, rec_type, kf_back)
+            self._core.append(timestamp, station, data, rec_type, kf_back)
 
     def sync(self) -> None:
         if self._core is not None:
@@ -180,23 +187,22 @@ class MlaArchive:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def query(source: Iterable[tuple[MlaLog, bytes]], *,
-          time_from:  int | None = None,
-          time_to:    int | None = None,
-          station:    int | None = None,
-          region:    int | None = None,
-          rec_type:   int | None = None,
-          enc:        int | None = None) -> Iterator[tuple[MlaLog, bytes]]:
+          time_from: int | None = None,
+          time_to:   int | None = None,
+          station:   int | None = None,
+          rec_type:  int | None = None,
+          enc:       int | None = None) -> Iterator[tuple[MlaLog, bytes]]:
     """
     Filter records from any source that iterates (MlaLog, data) —
     i.e. both MlaCore and MlaArchive.
 
     Filters (None = do not apply):
       time_from / time_to — closed interval of timestamps (Unix seconds)
-      station / region   — exact match
+      station             — exact match on the station index
       rec_type            — exact match of the whole rec_type byte
       enc                 — match on encoding only (low nibble of rec_type)
 
-    The search runs on the host over the loaded log — no on-disk tree (see spec §1).
+    The search runs on the host over the loaded log — no on-disk tree.
     """
     for rec, data in source:
         if time_from is not None and rec.timestamp < time_from:
@@ -204,8 +210,6 @@ def query(source: Iterable[tuple[MlaLog, bytes]], *,
         if time_to is not None and rec.timestamp > time_to:
             continue
         if station is not None and rec.station != station:
-            continue
-        if region is not None and rec.region != region:
             continue
         if rec_type is not None and rec.rec_type != rec_type:
             continue
@@ -225,17 +229,17 @@ if __name__ == "__main__":
     tmp = tempfile.mkdtemp(prefix="nic_mla_arch_")
     try:
         print("── Rotation: writing 300 records into small 2 KB files ──")
-        with MlaArchive(tmp, file_size=2048, checkpoint_shift=4) as arch:
+        with MlaArchive(tmp, file_size=2048) as arch:
             for i in range(300):
-                arch.append(1_600_000_000 + i, station=1, region=i % 4,
+                arch.append(1_600_000_000 + i, station=1 + (i % 4),
                             data=bytes([i & 0xFF] * 3))
         arch_ro = MlaArchive(tmp, file_size=2048)
         print(f"  Files created:   {arch_ro.file_count}")
         print(f"  Total records:   {arch_ro.total_records}")
 
-        print("\n── Query: region 2 only ──")
-        n = sum(1 for _ in query(arch_ro, region=2))
-        print(f"  Records on region 2: {n}")
+        print("\n── Query: station index 2 only ──")
+        n = sum(1 for _ in query(arch_ro, station=2))
+        print(f"  Records on station 2: {n}")
 
         print("\n── Query: time window 1_600_000_010 .. 1_600_000_020 ──")
         rows = list(query(arch_ro, time_from=1_600_000_010, time_to=1_600_000_020))

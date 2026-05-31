@@ -60,7 +60,7 @@ static bool create_and_format(uint32_t seq) {
   for (uint32_t i = 0; i < MLA_SIZE; i += sizeof(ff)) g_file.write(ff, sizeof(ff));
   g_file.sync();
   g_seq = seq;
-  return mla_w_format(&g_w, make_hal(), MLA_SIZE, MLA_CRC_FULL, 12, 8, 8) == MLA_OK;
+  return mla_w_format(&g_w, make_hal(), MLA_SIZE, MLA_CRC_FULL, 12, 8) == MLA_OK;
 }
 
 static bool roll_to_next() {              /* current is full → next file */
@@ -93,11 +93,11 @@ void loop() {
   sample[0] = (uint8_t)t; sample[1] = (uint8_t)(t >> 8);
   sample[2] = (uint8_t)analogRead(A1); sample[3] = 0;
 
-  int rc = mla_w_append(&g_w, ts, 1, 0, sample, sizeof(sample), MLA_ENC_RAW, 0);
+  int rc = mla_w_append(&g_w, ts, 1, sample, sizeof(sample), MLA_ENC_RAW, 0);
   if (rc == MLA_E_FULL) {                  /* file full → roll over */
     if (roll_to_next()) {
       Serial.print(F("rolled to ")); Serial.println(g_name);
-      mla_w_append(&g_w, ts, 1, 0, sample, sizeof(sample), MLA_ENC_RAW, 0);
+      mla_w_append(&g_w, ts, 1, sample, sizeof(sample), MLA_ENC_RAW, 0);
     } else {
       Serial.println(F("roll failed"));
     }

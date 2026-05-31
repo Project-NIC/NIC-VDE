@@ -26,13 +26,20 @@ it into a computer, and you have everything. No zoo of formats.
 
 - **One file = data + log.** Two streams grow toward each other: data from the
   top, the log from the bottom.
+- **Dumb container.** MLA only stores bytes. All the brains (compression,
+  encryption, station-number translation, LoRa/Wi-Fi) live in a separate glue
+  layer — MLA stays small and never gets in the way.
+- **Tiny 16 B log record, fully CRC-protected.** No "flags outside the CRC"
+  trick: abandon a record by overwriting it with zeros — its CRC then fails and
+  readers skip it.
 - **Crash-safe.** "LOCK first, DATA second" commit protocol + CRC16 (CCITT-FALSE).
-  An interrupted write is safely detected and cleaned up at startup.
+  After a reset the last record either verifies (carry on) or is zeroed and the
+  space reclaimed. No on-disk search tree to corrupt.
+- **Self-describing.** The prefix carries a SCHEMA table (8-char field names +
+  units → ready for CSV/SQL export with no prior knowledge) and a STATION table
+  (the 1-byte station index in each log record → the real station number).
 - **Small for a microcontroller.** The ATmega328 (2 KB RAM) only writes; no
-  dynamic allocation, largest buffer 24 B. Searching and reading happen on the host.
-- **Checkpoint.** A periodic anchor point speeds up startup and recovery.
-- **Optional index region.** A small host-side time/station skip-table for fast
-  queries (configurable; off by default — the write-only/MCU path never fills it).
+  dynamic allocation, largest buffer 32 B. Searching and reading happen on the host.
 - **File rotation.** When one file fills up, the next is started; large volumes =
   many smaller files, the host reads them as a whole.
 - **32-bit addressing** → a single file up to 4 GB (beyond that, rotation).
@@ -47,17 +54,19 @@ it into a computer, and you have everything. No zoo of formats.
 
 ```
 offset 0                                                              EOF
-┌────────┬───────────┬──────────────────┬───────────────┬──────────────┐
-│ PREFIX │ INDEX     │ DATA  stream  →   │   free  0xFF   │   ← LOG stream│
-│ 512 B  │ (optional)│ (grows up)        │               │ (grows down)  │
-└────────┴───────────┴──────────────────┴───────────────┴──────────────┘
+┌──────────────────┬──────────────────┬───────────────┬──────────────┐
+│ PREFIX           │ DATA  stream  →   │   free  0xFF   │   ← LOG stream│
+│ 1–255 sectors    │ (grows up)        │               │ (grows down)  │
+│ (512 B each)     │                   │               │               │
+└──────────────────┴──────────────────┴───────────────┴──────────────┘
 ```
 
+- **Prefix:** a 34 B header + the SCHEMA and STATION tables, covered by a CRC16
+  in its last 2 bytes. Normally one 512 B sector; it grows in whole sectors
+  (up to 255 ≈ 127 KB) only if the tables need it.
 - **Data block:** `MAGIC(2) + payload(1..65535) + CRC16(2)`
-- **Log record (24 B):** timestamp, offset, station, channel, seq, rec_type,
-  length, kf_back, flags (outside the CRC), CRC16
-- **Index** (optional): a flat array of 12 B anchors (timestamp + log slot +
-  station); empty when disabled.
+- **Log record (16 B), all CRC-covered:** offset, timestamp, length, rec_type,
+  kf_back, station (1-byte index), reserved, CRC16.
 
 ## Repository structure
 
@@ -65,9 +74,9 @@ offset 0                                                              EOF
 |---|---|
 | `nic_mla.py` | Python reference core (format / mount / append / read / scan / recover) |
 | `nic_mla_archive.py` | Python: file rotation (`MlaArchive`) + host-side query (`query`) |
+| `tools/mla_schema.py` | Build/read the SCHEMA + STATION tables; decode payloads for CSV/SQL |
 | `nic_mla_test.py` | Test suite (Python) |
 | `c/` | C libraries: write-only (MCU) + complete (ARM/PC) + HAL adapters |
-| `experimental/` | Frozen / purely theoretical (raw SPI-NOR simulator) |
 | `DESIGN-MLA.md` | Format design specification |
 
 ## Quick start — Python
@@ -80,7 +89,7 @@ hal = MlaPosixHAL.create("log.mla")
 with hal:
     mla = MlaCore(hal)
     mla.format()
-    mla.append(timestamp, station=1, channel=0, data=b"\x01\x02\x03")
+    mla.append(timestamp, station=1, data=b"\x01\x02\x03")   # station = table index
 
 # Later runs: mount() restores the state; iteration reads records
 with MlaPosixHAL("log.mla") as hal:
@@ -94,22 +103,37 @@ Rotation across multiple files and filtering:
 ```python
 from nic_mla_archive import MlaArchive, query
 with MlaArchive("/data") as arch:          # MLA00000.MLA, MLA00001.MLA, …
-    arch.append(ts, 1, 0, payload)
+    arch.append(ts, station=1, data=payload)
 for rec, data in query(MlaArchive("/data"), station=1, time_from=t0, time_to=t1):
     ...
 ```
 
-Accelerated query with an index region:
+Self-describing file (schema + station tables → ready for CSV/SQL export):
 
 ```python
+from mla_schema import SchemaBuilder, StationTable, read_schema, \
+                       read_stations, decode_payload, split_station
+
+sb = SchemaBuilder()
+sb.data("temp", unit="degC", width=2, exp10=-1, signed=True)
+sb.data("hum",  unit="pct",  width=2, exp10=-1)
+st = StationTable()
+st.station(region=55, number=25000)          # log index 1 → this station
+
 hal = MlaPosixHAL.create("log.mla")
 with hal:
     mla = MlaCore(hal)
-    mla.format(index_kb=4)                  # reserve a 4 KB time/station skip-table
-    ...
-    # later, on the host:
-    for rec, data in mla.scan(time_from=t0, time_to=t1, station=1):
-        ...
+    mla.format(schema_table=sb.table(), station_table=st.table())
+    mla.append(ts, station=1, data=temp.to_bytes(2,"little",signed=True)+hum.to_bytes(2,"little"))
+
+# Any reader recovers names, units and the real station number — no prior knowledge:
+with MlaPosixHAL("log.mla") as hal:
+    mla = MlaCore(hal); mla.mount()
+    pfx = mla._prefix.to_bytes()
+    _, fields = read_schema(pfx); stations = read_stations(pfx)
+    for rec, data in mla:
+        region, number, _ = split_station(stations[rec.station - 1])
+        cols = decode_payload(fields, data)   # [(name, unit, value), …]
 ```
 
 Tests:
@@ -143,6 +167,18 @@ cc -std=c99 -Wall -Wextra -O2 nic_mla_test.c nic_mla.c nic_mla_write.c \
 ```
 
 See **[`c/README.md`](c/README.md)**.
+
+## Notes for integrators
+
+- **Station names are not in the file.** The STATION table stores only 6 raw
+  bytes per station; what they mean (region / number / city / …) is decided by
+  your glue layer, which keeps its own mapping "6 bytes → meaning". The log
+  carries just a 1-byte index — translating it to a real station number is the
+  glue's job, not the container's.
+- **The `reserved` byte in the log record is padding** that rounds the record up
+  to 16 B (a power of two, so it never straddles a sector). It is inside the CRC
+  and currently always 0 — treat it as a free slot for a future field, not as
+  something that carries meaning today.
 
 ## Data transport (LoRa / network)
 

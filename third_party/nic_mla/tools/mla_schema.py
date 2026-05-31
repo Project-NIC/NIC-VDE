@@ -55,30 +55,40 @@ Python 3.10+   |   MIT   |   ★ Viva La Resistánce ★
 from __future__ import annotations
 
 import os
+import struct
 from dataclasses import dataclass
 
-# ── Format constants (mirror nic_mla_format.h) ──────────────────────────────
-MLA_SCHEMA_VER = 1                        # the one and only table version (v1.0)
-MLA_SCHEMA_OFF = 34                       # = MLA_PFX_HDR_SIZE
-MLA_PREFIX_SIZE = 512                     # base prefix block; grows in 512 B steps if needed
-MLA_NAME_LEN   = 8                        # bytes reserved for a field name, UTF-8, NUL-padded
-MLA_FIELD_CORE = 6                        # width, unit, exp10, flags, offset[i16]
-MLA_FIELD_SIZE = MLA_FIELD_CORE + MLA_NAME_LEN   # 14 — one field descriptor
-MLA_DATA_MAX   = 255                      # max data payload per record (1 B length in the log)
-MLA_PREFIX_MAX = 8 * MLA_PREFIX_SIZE      # 4 KB / 8 sectors — hard ceiling for the prefix
+# ── Format constants (mirror nic_mla.py / nic_mla_format.h) ─────────────────
+MLA_SCHEMA_VER  = 1                       # schema table version (v1.0)
+MLA_SCHEMA_OFF  = 34                      # = MLA_PFX_HDR_SIZE
+MLA_PREFIX_SIZE = 512                     # base prefix sector; grows in 512 B steps
+MLA_MAX_PREFIX_SEC = 255                  # hard limit: 255 sectors (~127 KB) — theoretical
+MLA_REC_PREFIX_SEC = 16                   # recommended ceiling: 16 sectors (8 KB)
+MLA_NAME_LEN    = 8                       # bytes reserved for a field name, UTF-8, NUL-padded
+MLA_FIELD_CORE  = 6                       # width, unit, exp10, flags, offset[i16]
+MLA_FIELD_SIZE  = MLA_FIELD_CORE + MLA_NAME_LEN   # 14 — one field descriptor
+MLA_DATA_MAX    = 255                     # max data payload per record (1 B length in the log)
+MLA_STATION_VER = 0x53                    # station table tag (distinct from schema ver)
+MLA_STATION_REC = 6                       # raw bytes per station (meaning = host glue's)
 
 
-def prefix_byte_len(schema_len: int) -> int:
-    """Total prefix size for a schema of `schema_len` bytes (CRC included).
+def prefix_byte_len(schema_len: int, station_len: int = 0) -> int:
+    """Total prefix size (CRC included) for the given table sizes.
 
-    The prefix is normally 512 B (schema fits in [34..510), CRC at [510]). If
-    the schema would overflow that, the prefix grows in whole 512 B blocks and
-    the CRC sits in the last 2 bytes. Mirrors _prefix_byte_len in nic_mla.py.
+    Normally 512 B (tables fit a single sector, CRC at [510]). If they overflow,
+    the prefix grows in whole 512 B sectors (CRC in the last 2 bytes), up to
+    MLA_MAX_PREFIX_SEC. Mirrors _prefix_byte_len() in nic_mla.py.
     """
-    need = MLA_SCHEMA_OFF + schema_len + 2            # header + schema + CRC16
+    need = MLA_SCHEMA_OFF + schema_len + station_len + 2   # header + tables + CRC16
     if need <= MLA_PREFIX_SIZE:
         return MLA_PREFIX_SIZE
-    return -(-need // MLA_PREFIX_SIZE) * MLA_PREFIX_SIZE   # round up to 512
+    sectors = -(-need // MLA_PREFIX_SIZE)                  # round up to 512
+    if sectors > MLA_MAX_PREFIX_SEC:
+        raise ValueError(
+            f"prefix needs {sectors} sectors, exceeds "
+            f"MLA_MAX_PREFIX_SEC={MLA_MAX_PREFIX_SEC}"
+        )
+    return sectors * MLA_PREFIX_SIZE
 
 
 # ── Universal unit vocabulary (shared by the spec; name -> code) ────────────
@@ -151,12 +161,9 @@ class Field:
                    exp10=exp10, signed=bool(flags & 0x01), offset=offset)
 
 
-# ── Field presets (handy names for common log/data fields) ───────────────────
+# ── Field presets (handy names for common data fields) ───────────────────────
 PRESETS: dict[str, Field] = {
     "datetime": Field("datetime", 4, "unix_s"),
-    "station":  Field("station",  2, "id"),
-    "region":   Field("region",   2, "id"),
-    "channel":  Field("channel",  2, "id"),
 }
 
 
@@ -253,6 +260,84 @@ def decode_payload(data_fields: list[Field],
     return out
 
 
+# ── Station table (dumb: index → 6 raw bytes) ───────────────────────────────
+#  The log carries a 1-byte station INDEX (1..255, 0 = none). The real numbers
+#  live here, one 6 B record per station. MLA never interprets those 6 bytes —
+#  how they split (region/city/number/…) is entirely the host glue's business.
+#
+#  Binary layout:
+#     [0] sta_ver  1B  = MLA_STATION_VER
+#     [1] n        1B  number of stations (1..255); index i (1..n) → record i-1
+#     [2 ..]           n × 6 B raw records
+
+class StationTable:
+    """Collect station records (6 raw bytes each) and emit the binary table.
+
+    The 6 bytes are opaque to MLA. Two convenience encoders are offered for the
+    common "region(2) + number(2) + reserved(2)" split, but you can push any
+    6 raw bytes via .raw(); the host glue decides what they mean.
+    """
+
+    def __init__(self) -> None:
+        self.records: list[bytes] = []
+
+    def raw(self, six: bytes) -> "StationTable":
+        if len(six) != MLA_STATION_REC:
+            raise ValueError(f"station record must be {MLA_STATION_REC} B, got {len(six)}")
+        if len(self.records) >= 255:
+            raise ValueError("at most 255 stations (1-byte index)")
+        self.records.append(bytes(six))
+        return self
+
+    def station(self, region: int = 0, number: int = 0,
+                reserved: int = 0xFFFF) -> "StationTable":
+        """Convenience: region(2) + number(2) + reserved(2), all u16 LE."""
+        for name, v in (("region", region), ("number", number), ("reserved", reserved)):
+            if not 0 <= v <= 0xFFFF:
+                raise ValueError(f"{name} out of u16 range: {v}")
+        return self.raw(struct.pack("<HHH", region, number, reserved))
+
+    def table(self) -> bytes:
+        n = len(self.records)
+        if n == 0:
+            return b""
+        if n > 255:
+            raise ValueError("at most 255 stations")
+        return bytes([MLA_STATION_VER, n]) + b"".join(self.records)
+
+
+def station_byte_len(prefix: bytes, off: int) -> int:
+    """Length of the station table starting at `off` (0 if none)."""
+    if len(prefix) < off + 2 or prefix[off] != MLA_STATION_VER:
+        return 0
+    return 2 + MLA_STATION_REC * prefix[off + 1]
+
+
+def read_stations(prefix: bytes) -> list[bytes] | None:
+    """Decode the station table → list of 6-byte records (None if absent).
+
+    Index i in the log (1..n) maps to records[i-1]; index 0 means "no station".
+    The 6 bytes stay raw — the host glue translates them.
+    """
+    slen = schema_byte_len(prefix)
+    off  = MLA_SCHEMA_OFF + slen
+    if len(prefix) < off + 2 or prefix[off] != MLA_STATION_VER:
+        return None
+    n = prefix[off + 1]
+    end = off + 2 + MLA_STATION_REC * n
+    if len(prefix) < end:
+        raise ValueError("station table: truncated")
+    return [bytes(prefix[off + 2 + i * MLA_STATION_REC:
+                         off + 2 + (i + 1) * MLA_STATION_REC]) for i in range(n)]
+
+
+def split_station(record: bytes) -> tuple[int, int, int]:
+    """Convenience inverse of StationTable.station(): (region, number, reserved)."""
+    if len(record) != MLA_STATION_REC:
+        raise ValueError(f"station record must be {MLA_STATION_REC} B")
+    return struct.unpack("<HHH", record)
+
+
 # ── Builder ────────────────────────────────────────────────────
 class SchemaBuilder:
     """Configure the schema by adding fields, then emit the table.
@@ -295,19 +380,14 @@ class SchemaBuilder:
         out = bytes([MLA_SCHEMA_VER, len(self.log_fields), len(self.data_fields)])
         for f in self.log_fields + self.data_fields:
             out += f.descriptor()
-        # A table that overflows the base 512 B prefix grows it in 512 B steps
-        # (the CRC moves to the new end), but only up to MLA_PREFIX_MAX.
-        psize = prefix_byte_len(len(out))
-        if psize > MLA_PREFIX_MAX:
-            raise ValueError(
-                f"schema needs a {psize} B prefix, exceeds "
-                f"MLA_PREFIX_MAX={MLA_PREFIX_MAX} ({MLA_PREFIX_MAX // MLA_PREFIX_SIZE} sectors)"
-            )
+        # A table that overflows the base 512 B prefix grows it in 512 B sectors
+        # (CRC moves to the new end); prefix_byte_len() caps it at 255 sectors.
+        prefix_byte_len(len(out))
         return out
 
-    def prefix_size(self) -> int:
-        """Total prefix size (B) needed to carry this table, incl. the CRC."""
-        return prefix_byte_len(len(self.table()))
+    def prefix_size(self, station_len: int = 0) -> int:
+        """Total prefix size (B) needed to carry this table (+ optional station)."""
+        return prefix_byte_len(len(self.table()), station_len)
 
     def describe(self) -> str:
         def row(f: Field) -> str:
@@ -345,9 +425,9 @@ class SchemaBuilder:
  * includes this; only {stem}.c changes when you build a different station.
  *
  * Embed at format() time:
- *     mla_w_format_ex(&w, hal, file_size, crc_mode, cluster_shift,
- *                     checkpoint_shift, keyframe_intv,
- *                     mla_schema_table, MLA_SCHEMA_TABLE_LEN);
+ *     mla_w_format_ex(&w, hal, file_size, crc_mode, cluster_shift, keyframe_intv,
+ *                     mla_schema_table, MLA_SCHEMA_TABLE_LEN,
+ *                     mla_station_table, MLA_STATION_TABLE_LEN);
  */
 #ifndef {guard}
 #define {guard}
@@ -382,8 +462,8 @@ if __name__ == "__main__":
     sb = SchemaBuilder()
 
     # ── EDIT HERE — add as many fields as you need ─────────
-    # LOG header: stripped from the incoming packet into the fixed 24 B log
-    sb.log("datetime").log("station").log("region")
+    # LOG header: the datetime field describes the log record's timestamp.
+    sb.log("datetime")
 
     # DATA payload: one entry per sensor value, packed back-to-back
     sb.data("temp_in",   unit="degC", width=2, exp10=-1, signed=True, offset=-15)  # calib.
@@ -400,10 +480,19 @@ if __name__ == "__main__":
     sb.data("rain",      unit="mm",   width=2, exp10=-1)
     # ─────────────────────────────────────────────────────────────────────────
 
+    # STATION table: index 1..n → (region, number). Filled by the host glue;
+    # here just an example of a few stations in one region.
+    st = StationTable()
+    st.station(region=55, number=25000)    # index 1
+    st.station(region=55, number=25001)    # index 2
+    st.station(region=55, number=25777)    # index 3 — gaps are fine
+    station_table = st.table()
+
     table = sb.table()
     print(sb.describe())
-    print(f"\ntable = {len(table)} B  (prefix {sb.prefix_size()} B): "
-          + " ".join(f"{b:02X}" for b in table))
+    print(f"\nschema  = {len(table)} B: " + " ".join(f"{b:02X}" for b in table))
+    print(f"station = {len(station_table)} B ({len(st.records)} stations)")
+    print(f"prefix  = {sb.prefix_size(len(station_table))} B")
 
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = os.path.join(repo, "c", "mla_schema_table.c")

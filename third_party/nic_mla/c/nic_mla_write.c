@@ -4,126 +4,163 @@
  */
 #include "nic_mla_write.h"
 
-int mla_w_format_ex(mla_writer_t *w, mla_hal_t hal,
-                    uint32_t file_size, uint8_t crc_mode,
-                    uint8_t cluster_shift, uint8_t checkpoint_shift,
-                    uint8_t keyframe_intv,
-                    const uint8_t *table, uint16_t table_len) {
+/* Write the prefix (header + schema + station + zero padding + CRC), streaming
+ * so the chip needs no large buffer. The prefix spans `psize` bytes (a 512 B
+ * multiple) with the CRC in its last 2 bytes. */
+static int write_prefix(mla_writer_t *w, const mla_prefix_t *p, uint32_t psize,
+                        const uint8_t *schema, uint16_t schema_len,
+                        const uint8_t *station, uint16_t station_len) {
     uint8_t  hdr[MLA_PFX_HDR_SIZE];
     uint8_t  zero[32];
-    mla_prefix_t p;
     uint16_t crc, n;
-    uint32_t pos;
+    uint32_t pos, body = psize - 2u;
 
-    if (table == 0) table_len = 0;
-    if (table_len > MLA_SCHEMA_MAX) return MLA_E_RANGE;
-
-    w->hal             = hal;
-    w->file_size       = file_size;
-    w->flags           = crc_mode;
-    w->checkpoint_shift= checkpoint_shift;
-    w->log_rec_size    = MLA_LOG_REC_SIZE;
-
-    p.version          = MLA_VERSION;
-    p.cluster_shift    = cluster_shift;
-    p.log_rec_size     = MLA_LOG_REC_SIZE;
-    p.flags            = crc_mode;
-    p.file_size        = file_size;
-    p.phys_addr        = 0;
-    p.container_kind   = 0;
-    p.file_seq         = 0;
-    p.keyframe_intv    = keyframe_intv;
-    p.enc_caps         = 0;
-    p.data_base        = MLA_PREFIX_SIZE;
-    p.region_end       = file_size;
-    p.checkpoint_shift = checkpoint_shift;
-    mla_prefix_build_hdr(hdr, &p);
-
-    /* CRC over [0..509]: header, then the schema table, then zero padding */
-    crc = mla_crc16_ex(0xFFFFu, hdr, MLA_PFX_HDR_SIZE);
-    if (table_len) crc = mla_crc16_ex(crc, table, table_len);
+    mla_prefix_build_hdr(hdr, p);
     memset(zero, 0, sizeof(zero));
-    { uint16_t rem = (uint16_t)(510u - MLA_PFX_HDR_SIZE - table_len);
-      while (rem) { n = rem < sizeof(zero) ? rem : (uint16_t)sizeof(zero);
-                    crc = mla_crc16_ex(crc, zero, n); rem = (uint16_t)(rem - n); } }
 
+    /* CRC over [0 .. body): header, schema, station, then zero padding */
+    crc = mla_crc16_ex(0xFFFFu, hdr, MLA_PFX_HDR_SIZE);
+    if (schema_len)  crc = mla_crc16_ex(crc, schema, schema_len);
+    if (station_len) crc = mla_crc16_ex(crc, station, station_len);
+    { uint32_t rem = body - MLA_PFX_HDR_SIZE - schema_len - station_len;
+      while (rem) { n = (uint16_t)(rem < sizeof(zero) ? rem : sizeof(zero));
+                    crc = mla_crc16_ex(crc, zero, n); rem -= n; } }
+
+    /* Write: header, schema, station */
     if (w->hal.write(w->hal.ctx, 0, hdr, MLA_PFX_HDR_SIZE) != 0) return MLA_E_IO;
-    if (table_len &&
-        w->hal.write(w->hal.ctx, MLA_SCHEMA_OFF, table, table_len) != 0) return MLA_E_IO;
-    pos = (uint32_t)MLA_PFX_HDR_SIZE + table_len;
-    while (pos < 510u) {
-        n = (uint16_t)((510u - pos) < sizeof(zero) ? (510u - pos) : sizeof(zero));
+    pos = MLA_PFX_HDR_SIZE;
+    if (schema_len) {
+        if (w->hal.write(w->hal.ctx, pos, schema, schema_len) != 0) return MLA_E_IO;
+        pos += schema_len;
+    }
+    if (station_len) {
+        if (w->hal.write(w->hal.ctx, pos, station, station_len) != 0) return MLA_E_IO;
+        pos += station_len;
+    }
+    /* Zero padding up to body */
+    while (pos < body) {
+        n = (uint16_t)((body - pos) < sizeof(zero) ? (body - pos) : sizeof(zero));
         if (w->hal.write(w->hal.ctx, pos, zero, n) != 0) return MLA_E_IO;
         pos += n;
     }
     { uint8_t crcb[2]; mla_put_u16(crcb, crc);
-      if (w->hal.write(w->hal.ctx, 510, crcb, 2) != 0) return MLA_E_IO; }
+      if (w->hal.write(w->hal.ctx, body, crcb, 2) != 0) return MLA_E_IO; }
     w->hal.sync(w->hal.ctx);
+    return MLA_OK;
+}
 
-    w->top_ptr = MLA_PREFIX_SIZE;
+int mla_w_format_ex(mla_writer_t *w, mla_hal_t hal,
+                    uint32_t file_size, uint8_t crc_mode,
+                    uint8_t cluster_shift, uint8_t keyframe_intv,
+                    const uint8_t *schema, uint16_t schema_len,
+                    const uint8_t *station, uint16_t station_len) {
+    mla_prefix_t p;
+    uint32_t psize;
+    int rc;
+
+    if (schema == 0)  schema_len = 0;
+    if (station == 0) station_len = 0;
+    psize = mla_prefix_size(schema_len, station_len);
+    if (psize == 0) return MLA_E_RANGE;
+
+    w->hal          = hal;
+    w->file_size    = file_size;
+    w->flags        = crc_mode;
+    w->log_rec_size = MLA_LOG_REC_SIZE;
+    w->data_base    = psize;
+
+    p.version       = MLA_VERSION;
+    p.cluster_shift = cluster_shift;
+    p.log_rec_size  = MLA_LOG_REC_SIZE;
+    p.flags         = crc_mode;
+    p.file_size     = file_size;
+    p.container_kind= 0;
+    p.file_seq      = 0;
+    p.keyframe_intv = keyframe_intv;
+    p.enc_caps      = 0;
+    p.data_base     = psize;
+    p.region_end    = file_size;
+
+    rc = write_prefix(w, &p, psize, schema, schema_len, station, station_len);
+    if (rc != MLA_OK) return rc;
+
+    w->top_ptr = psize;
     w->bot_ptr = file_size;
     w->count   = 0;
-    w->seq     = 0;
     return MLA_OK;
 }
 
 int mla_w_format(mla_writer_t *w, mla_hal_t hal,
                  uint32_t file_size, uint8_t crc_mode,
-                 uint8_t cluster_shift, uint8_t checkpoint_shift,
-                 uint8_t keyframe_intv) {
+                 uint8_t cluster_shift, uint8_t keyframe_intv) {
     return mla_w_format_ex(w, hal, file_size, crc_mode, cluster_shift,
-                           checkpoint_shift, keyframe_intv, 0, 0);
+                           keyframe_intv, 0, 0, 0, 0);
 }
 
 /* ── verify the prefix by streaming + load its fields ───────────────────── */
-static int read_prefix(mla_writer_t *w, mla_prefix_t *p) {
+/* The prefix size is self-describing from the table headers; we first read the
+ * header sector, derive the size, then CRC the whole prefix. */
+static int read_prefix(mla_writer_t *w, mla_prefix_t *p, uint32_t *psize_out) {
+    uint8_t  hdr[MLA_PFX_HDR_SIZE];
     uint8_t  buf[32];
-    uint16_t crc = 0xFFFFu, n, stored;
-    uint32_t pos = 0;
+    uint16_t crc = 0xFFFFu, n, stored, schema_len = 0, station_len = 0;
+    uint32_t pos, body, psize;
 
-    /* CRC over [0..509] in 32 B chunks */
-    while (pos < 510u) {
-        n = (uint16_t)((510u - pos) < sizeof(buf) ? (510u - pos) : sizeof(buf));
+    if (w->hal.read(w->hal.ctx, 0, hdr, MLA_PFX_HDR_SIZE) != 0) return MLA_E_IO;
+    if (!mla_prefix_parse_hdr(hdr, p)) return MLA_E_BADFMT;
+
+    /* Table sizes come from the header bytes just past the structured header.
+     * Read enough to see both table headers (schema: 3 B, station: 2 B). */
+    {
+        uint8_t th[5];
+        if (w->hal.read(w->hal.ctx, MLA_SCHEMA_OFF, th, 5) != 0) return MLA_E_IO;
+        if (th[0] == MLA_SCHEMA_VER) schema_len = mla_schema_size(th[1], th[2]);
+        {
+            uint8_t sh[2];
+            if (w->hal.read(w->hal.ctx, MLA_SCHEMA_OFF + schema_len, sh, 2) != 0) return MLA_E_IO;
+            if (sh[0] == MLA_STATION_VER) station_len = mla_station_size(sh[1]);
+        }
+    }
+    psize = mla_prefix_size(schema_len, station_len);
+    if (psize == 0) return MLA_E_BADFMT;
+    body = psize - 2u;
+
+    /* CRC over [0 .. body) */
+    pos = 0;
+    while (pos < body) {
+        n = (uint16_t)((body - pos) < sizeof(buf) ? (body - pos) : sizeof(buf));
         if (w->hal.read(w->hal.ctx, pos, buf, n) != 0) return MLA_E_IO;
         crc = mla_crc16_ex(crc, buf, n);
         pos += n;
     }
-    if (w->hal.read(w->hal.ctx, 510, buf, 2) != 0) return MLA_E_IO;
+    if (w->hal.read(w->hal.ctx, body, buf, 2) != 0) return MLA_E_IO;
     stored = mla_get_u16(buf);
     if (crc != stored) return MLA_E_BADFMT;
 
-    /* header for the fields */
-    {
-        uint8_t hdr[MLA_PFX_HDR_SIZE];
-        if (w->hal.read(w->hal.ctx, 0, hdr, MLA_PFX_HDR_SIZE) != 0) return MLA_E_IO;
-        if (!mla_prefix_parse_hdr(hdr, p)) return MLA_E_BADFMT;
-    }
+    if (psize_out) *psize_out = psize;
     return MLA_OK;
 }
 
 int mla_w_mount(mla_writer_t *w, mla_hal_t hal) {
     mla_prefix_t p;
-    uint32_t fs, lo, hi, mid, max_slots, slot, start_slot, top, count;
+    uint32_t fs, lo, hi, mid, max_slots, slot, top, count, psize;
     uint16_t rs;
-    int32_t  last_seq = -1;
     uint8_t  rec_buf[MLA_LOG_REC_SIZE];
     mla_log_t rec;
     int rc;
 
     w->hal = hal;
-    rc = read_prefix(w, &p);
+    rc = read_prefix(w, &p, &psize);
     if (rc != MLA_OK) return rc;
 
-    w->file_size        = p.file_size;
-    w->flags            = p.flags;
-    w->checkpoint_shift = p.checkpoint_shift;
-    w->log_rec_size     = p.log_rec_size;
+    w->file_size    = p.file_size;
+    w->flags        = p.flags;
+    w->log_rec_size = p.log_rec_size;
+    w->data_base    = p.data_base;
     fs = p.file_size;
     rs = p.log_rec_size;
 
-    /* binary search for the boundary (number of used slots).
-     * Respect data_base so a file with an index region (written by the full lib)
-     * is handled correctly; the write-only path itself never reserves one. */
+    /* binary search for the log boundary (number of used slots) */
     max_slots = (fs - p.data_base) / rs;
     lo = 0; hi = max_slots;
     while (lo < hi) {
@@ -133,55 +170,24 @@ int mla_w_mount(mla_writer_t *w, mla_hal_t hal) {
         for (i = 0; i < rs; i++) if (rec_buf[i] != 0xFF) { all_ff = 0; break; }
         if (all_ff) hi = mid; else lo = mid + 1;
     }
-
     w->bot_ptr = fs - lo * rs;
     if (lo == 0) {
-        w->top_ptr = p.data_base;
-        w->count   = 0;
-        w->seq     = 0;
+        w->top_ptr = p.data_base; w->count = 0;
         return MLA_OK;
     }
 
-    /* newest checkpoint (from the newest slot backward) */
-    start_slot = 0; count = 0; top = MLA_PREFIX_SIZE;
-    {
-        uint32_t s;
-        for (s = lo; s-- > 0; ) {
-            if (w->hal.read(w->hal.ctx, fs - (s + 1) * rs, rec_buf, rs) != 0) return MLA_E_IO;
-            if (mla_log_parse(rec_buf, &rec) && mla_log_is_live(&rec) && mla_log_is_checkpoint(&rec)) {
-                count    = ((uint32_t)rec.station << 16) | rec.region;
-                top      = rec.offset;
-                last_seq = rec.seq;
-                start_slot = s + 1;
-                break;
-            }
-            if (s == 0) break;
-        }
-    }
-
-    /* forward scan of the tail */
-    for (slot = start_slot; slot < lo; slot++) {
+    /* forward scan: end of the newest valid record's data = top_ptr */
+    top = p.data_base; count = 0;
+    for (slot = 0; slot < lo; slot++) {
         uint32_t addr = fs - (slot + 1) * rs;
-        int is_newest = (slot == lo - 1);
         if (w->hal.read(w->hal.ctx, addr, rec_buf, rs) != 0) return MLA_E_IO;
-        if (!mla_log_parse(rec_buf, &rec)) continue;     /* torn lock */
-        last_seq = rec.seq;
-        if (mla_log_is_checkpoint(&rec)) {
-            count = ((uint32_t)rec.station << 16) | rec.region;
-            top   = rec.offset;
-            continue;
-        }
-        if (mla_log_is_abandoned(&rec)) {
-            if (is_newest) top = rec.offset;
-            continue;
-        }
-        /* LIVE data record */
-        if (is_newest) {
+        if (!mla_log_parse(rec_buf, &rec)) continue;     /* burned/abandoned slot */
+        if (slot == lo - 1) {                            /* newest — check data MAGIC */
             uint8_t magic[2];
             if (w->hal.read(w->hal.ctx, rec.offset, magic, 2) != 0) return MLA_E_IO;
             if (magic[0] != MLA_DATA_MAGIC0 || magic[1] != MLA_DATA_MAGIC1) {
-                uint8_t ab = MLA_FLAG_ABANDONED;
-                if (w->hal.write(w->hal.ctx, addr + 20, &ab, 1) != 0) return MLA_E_IO;
+                uint8_t z[MLA_LOG_REC_SIZE]; memset(z, 0, rs);
+                if (w->hal.write(w->hal.ctx, addr, z, rs) != 0) return MLA_E_IO;
                 w->hal.sync(w->hal.ctx);
                 top = rec.offset;
                 continue;
@@ -190,60 +196,32 @@ int mla_w_mount(mla_writer_t *w, mla_hal_t hal) {
         top = mla_log_block_end(&rec);
         count++;
     }
-
     w->top_ptr = top;
     w->count   = count;
-    w->seq     = (last_seq >= 0) ? (uint16_t)((last_seq + 1) & 0xFFFF) : 0;
     return MLA_OK;
 }
 
-/* ── checkpoint ─────────────────────────────────────────────────────────── */
-static int write_checkpoint(mla_writer_t *w, uint32_t timestamp) {
-    uint32_t new_bot = w->bot_ptr - w->log_rec_size;
-    uint8_t  buf[MLA_LOG_REC_SIZE];
-    mla_log_t cp;
-    if (new_bot <= w->top_ptr) return MLA_OK; /* no room — optional */
-    cp.timestamp = timestamp;
-    cp.offset    = w->top_ptr;
-    cp.station   = (uint16_t)((w->count >> 16) & 0xFFFF);
-    cp.region   = (uint16_t)(w->count & 0xFFFF);
-    cp.seq       = w->seq;
-    cp.rec_type  = MLA_REC_CHECKPOINT;
-    cp.length    = 0;
-    cp.kf_back   = 0;
-    cp.reserved  = 0;
-    cp.flags     = MLA_FLAG_LIVE;
-    mla_log_build(buf, &cp);
-    if (w->hal.write(w->hal.ctx, new_bot, buf, MLA_LOG_REC_SIZE) != 0) return MLA_E_IO;
-    w->bot_ptr = new_bot;
-    return MLA_OK;
-}
-
-int mla_w_append(mla_writer_t *w, uint32_t timestamp,
-                 uint16_t station, uint16_t region,
+int mla_w_append(mla_writer_t *w, uint32_t timestamp, uint8_t station,
                  const uint8_t *data, uint16_t len,
-                 uint8_t rec_type, uint16_t kf_back) {
+                 uint8_t rec_type, uint8_t kf_back) {
     uint32_t block_sz, new_bot;
     uint8_t  lock[MLA_LOG_REC_SIZE];
     mla_log_t r;
     uint16_t crc;
     uint8_t  mb[2], crcb[2];
 
-    if (len < 1) return MLA_E_RANGE;       /* 1..65535 (uint16 upper bound is fine) */
+    if (len < 1) return MLA_E_RANGE;
     block_sz = 2u + len + 2u;
-    if (w->top_ptr + block_sz > w->bot_ptr - w->log_rec_size) return MLA_E_FULL;
-
-    new_bot = w->bot_ptr - w->log_rec_size;
+    new_bot  = w->bot_ptr - w->log_rec_size;
+    if (w->top_ptr + block_sz > new_bot) return MLA_E_FULL;
 
     /* Step 1 — lock */
-    r.timestamp = timestamp; r.offset = w->top_ptr;
-    r.station = station; r.region = region;
-    r.seq = w->seq; r.rec_type = rec_type; r.length = len; r.kf_back = kf_back;
-    r.reserved = 0; r.flags = MLA_FLAG_LIVE;
+    r.offset = w->top_ptr; r.timestamp = timestamp; r.length = len;
+    r.rec_type = rec_type; r.kf_back = kf_back; r.station = station; r.reserved = 0;
     mla_log_build(lock, &r);
     if (w->hal.write(w->hal.ctx, new_bot, lock, MLA_LOG_REC_SIZE) != 0) return MLA_E_IO;
 
-    /* Step 2 — data: MAGIC, payload (directly), CRC — without a large buffer */
+    /* Step 2 — data: MAGIC, payload, CRC (no large buffer) */
     mb[0] = MLA_DATA_MAGIC0; mb[1] = MLA_DATA_MAGIC1;
     if (w->hal.write(w->hal.ctx, w->top_ptr, mb, 2) != 0) return MLA_E_IO;
     if (w->hal.write(w->hal.ctx, w->top_ptr + 2, data, len) != 0) return MLA_E_IO;
@@ -255,10 +233,5 @@ int mla_w_append(mla_writer_t *w, uint32_t timestamp,
     w->top_ptr += block_sz;
     w->bot_ptr  = new_bot;
     w->count   += 1;
-    w->seq      = (uint16_t)((w->seq + 1) & 0xFFFF);
-
-    /* Step 4 — checkpoint */
-    if (w->checkpoint_shift && (w->count % (1u << w->checkpoint_shift)) == 0)
-        return write_checkpoint(w, timestamp);
     return MLA_OK;
 }

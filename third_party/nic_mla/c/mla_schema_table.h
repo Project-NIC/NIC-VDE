@@ -5,16 +5,16 @@
  * includes this; only mla_schema_table.c changes when you build a different station.
  *
  * Embed at format() time:
- *     mla_w_format_ex(&w, hal, file_size, crc_mode, cluster_shift,
- *                     checkpoint_shift, keyframe_intv,
- *                     mla_schema_table, MLA_SCHEMA_TABLE_LEN);
+ *     mla_w_format_ex(&w, hal, file_size, crc_mode, cluster_shift, keyframe_intv,
+ *                     mla_schema_table, MLA_SCHEMA_TABLE_LEN,
+ *                     mla_station_table, MLA_STATION_TABLE_LEN);
  */
 #ifndef MLA_SCHEMA_TABLE_H
 #define MLA_SCHEMA_TABLE_H
 
 #include <stdint.h>
 
-#define MLA_SCHEMA_TABLE_LEN 213u
+#define MLA_SCHEMA_TABLE_LEN 185u
 extern const uint8_t mla_schema_table[MLA_SCHEMA_TABLE_LEN];
 
 #endif /* MLA_SCHEMA_TABLE_H */

@@ -20,11 +20,19 @@ strčíš do počítače a máš všechno. Žádný zoo formátů.
 
 - **Jeden soubor = data + log.** Dva proudy rostou proti sobě: data shora,
   log zdola.
+- **Hloupý kontejner.** MLA jen ukládá bajty. Veškerá inteligence (komprese,
+  šifrování, překlad čísel stanic, LoRa/Wi-Fi) je v samostatné „glue" (lepidlo)
+  vrstvě — MLA zůstává malé a nepřekáží.
+- **Drobný 16 B log záznam, celý chráněný CRC.** Žádný trik „flags mimo CRC":
+  záznam se zahodí přepsáním na nuly — jeho CRC pak nesedí a čtečka ho přeskočí.
 - **Crash-safe.** Commit protokol „LOCK first, DATA second" + CRC16 (CCITT-FALSE).
-  Přerušený zápis se při startu bezpečně detekuje a uklidí.
+  Po resetu poslední záznam buď sedí (jede se dál), nebo se vynuluje a místo
+  uvolní. Žádný strom hledání na disku, který by se mohl rozbít.
+- **Sebepopisný.** Prefix nese SCHEMA tabulku (8znakové názvy polí + jednotky →
+  připraveno na export do CSV/SQL bez předchozí znalosti) a STATION tabulku
+  (1bajtový index stanice v každém log záznamu → skutečné číslo stanice).
 - **Malý pro mikrokontrolér.** ATmega328 (2 KB RAM) jen zapisuje; žádná dynamická
-  alokace, největší buffer 24 B. Hledání a čtení běží až na hostu.
-- **Kontrolní bod (checkpoint).** Periodický záchytný bod zrychlí start a obnovu.
+  alokace, největší buffer 32 B. Hledání a čtení běží až na hostu.
 - **Rotace souborů.** Po zaplnění se založí další soubor; velké objemy = víc
   menších souborů, host je čte jako celek.
 - **32-bit adresace** → jeden soubor až 4 GB (nad to rotace).
@@ -37,15 +45,19 @@ strčíš do počítače a máš všechno. Žádný zoo formátů.
 
 ```
 offset 0                                                        EOF
-┌──────────┬──────────────────┬──────────────────┬──────────────┐
-│ PREFIX   │ DATA  proud  →    │   volné  0xFF     │   ← LOG proud │
-│  512 B   │ (roste nahoru)    │                   │ (roste dolů)  │
-└──────────┴──────────────────┴──────────────────┴──────────────┘
+┌──────────────────┬──────────────────┬──────────────┬──────────────┐
+│ PREFIX           │ DATA  proud  →    │  volné  0xFF  │  ← LOG proud  │
+│ 1–255 sektorů    │ (roste nahoru)    │              │ (roste dolů)  │
+│ (po 512 B)       │                   │              │               │
+└──────────────────┴──────────────────┴──────────────┴──────────────┘
 ```
 
+- **Prefix:** 34 B hlavička + tabulky SCHEMA a STATION, kryté CRC16 v posledních
+  2 bajtech. Standardně jeden 512 B sektor; roste po celých sektorech (max 255 ≈
+  127 KB) jen když to tabulky potřebují.
 - **Datový blok:** `MAGIC(2) + payload(1..65535) + CRC16(2)`
-- **Log záznam (24 B):** timestamp, offset, station, channel, seq, rec_type,
-  length, kf_back, flags (mimo CRC), CRC16
+- **Log záznam (16 B), celý v CRC:** offset, timestamp, length, rec_type,
+  kf_back, station (1bajtový index), reserved, CRC16.
 
 ## Struktura repozitáře
 
@@ -53,9 +65,9 @@ offset 0                                                        EOF
 |---|---|
 | `nic_mla.py` | Python referenční jádro (format / mount / append / read / recover) |
 | `nic_mla_archive.py` | Python: rotace souborů (`MlaArchive`) + hostový dotaz (`query`) |
+| `tools/mla_schema.py` | Stavba/čtení tabulek SCHEMA + STATION; dekód payloadu pro CSV/SQL |
 | `nic_mla_test.py` | Testovací sada (Python) |
 | `c/` | C knihovny: write-only (MCU) + kompletní (ARM/PC) + HAL adaptéry |
-| `experimental/` | Zamrzlé / čistě teoretické (raw SPI-NOR simulátor) |
 | `DESIGN-MLA.md` | Návrhová specifikace formátu |
 
 ## Rychlý start — Python
@@ -68,7 +80,7 @@ hal = MlaPosixHAL.create("log.mla")
 with hal:
     mla = MlaCore(hal)
     mla.format()
-    mla.append(timestamp, station=1, channel=0, data=b"\x01\x02\x03")
+    mla.append(timestamp, station=1, data=b"\x01\x02\x03")   # station = index do tabulky
 
 # Další spuštění: mount() obnoví stav; iterace čte záznamy
 with MlaPosixHAL("log.mla") as hal:
@@ -82,9 +94,35 @@ Rotace přes víc souborů a filtrování:
 ```python
 from nic_mla_archive import MlaArchive, query
 with MlaArchive("/data") as arch:          # MLA00000.MLA, MLA00001.MLA, …
-    arch.append(ts, 1, 0, payload)
+    arch.append(ts, station=1, data=payload)
 for rec, data in query(MlaArchive("/data"), station=1, time_from=t0, time_to=t1):
     ...
+```
+
+Sebepopisný soubor (tabulky schema + stanice → export do CSV/SQL):
+
+```python
+from mla_schema import SchemaBuilder, StationTable, read_schema, \
+                       read_stations, decode_payload, split_station
+
+sb = SchemaBuilder()
+sb.data("temp", unit="degC", width=2, exp10=-1, signed=True)
+st = StationTable(); st.station(region=55, number=25000)   # index 1 → tato stanice
+
+hal = MlaPosixHAL.create("log.mla")
+with hal:
+    mla = MlaCore(hal)
+    mla.format(schema_table=sb.table(), station_table=st.table())
+    mla.append(ts, station=1, data=teplota.to_bytes(2, "little", signed=True))
+
+# Libovolná čtečka obnoví názvy, jednotky i skutečné číslo stanice — bez znalosti:
+with MlaPosixHAL("log.mla") as hal:
+    mla = MlaCore(hal); mla.mount()
+    pfx = mla._prefix.to_bytes()
+    _, fields = read_schema(pfx); stations = read_stations(pfx)
+    for rec, data in mla:
+        region, number, _ = split_station(stations[rec.station - 1])
+        cols = decode_payload(fields, data)   # [(název, jednotka, hodnota), …]
 ```
 
 Testy:
@@ -118,6 +156,16 @@ cc -std=c99 -Wall -Wextra -O2 nic_mla_test.c nic_mla.c nic_mla_write.c \
 ```
 
 Viz **[`c/README.md`](c/README.md)**.
+
+## Poznámky pro integrátory
+
+- **Názvy stanic nejsou v souboru.** Tabulka STATION nese jen 6 syrových bajtů
+  na stanici; co znamenají (region / číslo / město / …) určuje tvoje glue (lepidlo)
+  vrstva, která si drží vlastní mapování „6 bajtů → význam". Log nese jen 1bajtový
+  index — překlad na skutečné číslo stanice je práce glue, ne kontejneru.
+- **Bajt `reserved` v log záznamu je výplň**, která zarovnává záznam na 16 B
+  (mocnina dvojky, takže nikdy nepřesahuje sektor). Je uvnitř CRC a teď je vždy 0
+  — ber ho jako volné místo pro budoucí pole, ne jako něco, co dnes něco znamená.
 
 ## Přenos dat (LoRa / síť)
 
