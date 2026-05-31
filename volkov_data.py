@@ -14,10 +14,11 @@ Keys
   F2 Info        (record info inside MLA — same as F1 there)
   F3 View        view file / record payload (text or hex), ESC to close
   F5 Copy        copy selected file to the other panel
-  F6 RenMov      rename the selected item
+  F6 RenMov      rename in place, or move to the other panel (CSV export in MLA)
   F7 Mkdir       create a directory
   F8 Delete      delete the selected item (with confirmation)
-  F9 Menu        pull-down menu bar (←/→ switch column, ↑/↓ move, Enter pick)
+  F9 Menu        pull-down menu: Files, sorting, Options→Language, Export to SQL
+                 (←/→ switch column, ↑/↓ move, Enter pick, Esc close)
                  Left/Right → sort the panel (Name/Extension/Time/Size/…),
                  Files → the F-key actions, Commands → swap/re-read, …
   F10/q/Ctrl-Q   quit
@@ -40,6 +41,7 @@ from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.styles import Style
 
 import volkov_core as vc
+from volkov_i18n import LANGUAGES, Translator
 
 # Box-drawing (double frame + single divider tee)
 TL, TR, BL, BR, H, V = "╔", "╗", "╚", "╝", "═", "║"
@@ -86,6 +88,18 @@ class Panel:
             self.error = str(exc)
         self.selected = max(0, min(self.selected, len(self.entries) - 1))
         self.scroll = 0
+
+    def sort_choices(self) -> list[tuple[str, str]]:
+        """(mode, label) pairs offered for this panel.
+
+        Inside an .mla a record is just a logged event: only time and the
+        natural log order (seq = "unsorted") mean anything, so name/ext/size
+        are hidden there.
+        """
+        if isinstance(self.backend, vc.MlaBackend):
+            return [("time", "Time"), ("unsorted", "Sequence")]
+        return [("name", "Name"), ("ext", "Extension"),
+                ("time", "Time"), ("size", "Size"), ("unsorted", "Unsorted")]
 
     def set_sort(self, mode: str) -> None:
         """Switch sort mode, remembering which entry the cursor is on."""
@@ -168,7 +182,13 @@ class VolkovData:
         self.overlay = None
         # pull-down menu state: None when closed, else [col, row] of the cursor
         self.menu = None
+        # open one-level submenu: None | (items, cursor, parent_row)
+        self.submenu = None
+        self.i18n = Translator("en")
         self.app = self._build_app()
+
+    def tr(self, text: str) -> str:
+        return self.i18n.tr(text)
 
     # ── pull-down menu (top bar) ───────────────────────────────────────────
     MENU_TITLES = ["Left", "Files", "Commands", "Options", "Right"]
@@ -183,47 +203,52 @@ class VolkovData:
             pi = 0 if col == 0 else 1
             p = self.panels[pi]
             tick = lambda m: "• " if p.sort_mode == m else "  "
-            return [
-                (tick("name") + "Name", lambda: self.panels[pi].set_sort("name")),
-                (tick("ext") + "Extension", lambda: self.panels[pi].set_sort("ext")),
-                (tick("time") + "Time", lambda: self.panels[pi].set_sort("time")),
-                (tick("size") + "Size", lambda: self.panels[pi].set_sort("size")),
-                (tick("unsorted") + "Unsorted", lambda: self.panels[pi].set_sort("unsorted")),
-                None,
-                (("• " if p.sort_reverse else "  ") + "Reverse", lambda: self._toggle_reverse(pi)),
-                None,
-                ("  Re-read", lambda: self.panels[pi].reload()),
+            items = [
+                (tick(mode) + self.tr(label),
+                 (lambda m=mode: self.panels[pi].set_sort(m)))
+                for mode, label in p.sort_choices()
             ]
+            items += [
+                None,
+                (("• " if p.sort_reverse else "  ") + self.tr("Reverse"),
+                 lambda: self._toggle_reverse(pi)),
+                None,
+                ("  " + self.tr("Re-read"), lambda: self.panels[pi].reload()),
+            ]
+            return items
+        T = self.tr
         if col == 1:  # Files — the F-key actions
             return [
-                ("Info", self._do_info),
-                ("Repair / check", self._do_repair),
-                ("View", self._do_view),
-                ("Values", lambda: self._do_view(with_values=True)),
-                ("Copy", self._do_copy),
-                ("Rename or move", self._do_f6),
-                ("Make directory", self._do_mkdir),
-                ("Delete", self._do_delete),
+                (T("Info"), self._do_info),
+                (T("Repair / check"), self._do_repair),
+                (T("View"), self._do_view),
+                (T("Values"), lambda: self._do_view(with_values=True)),
+                (T("Copy"), self._do_copy),
+                (T("Rename or move"), self._do_f6),
+                (T("Export to SQL"), self._do_sql),
+                (T("Make directory"), self._do_mkdir),
+                (T("Delete"), self._do_delete),
                 None,
-                ("Quit", lambda: self.app.exit()),
+                (T("Quit"), lambda: self.app.exit()),
             ]
         if col == 2:  # Commands
             return [
-                ("Swap panels", self._swap_panels),
-                ("Re-read both", self._reread_both),
-                None,
-                ("Find file", None),
-                ("History", None),
-                ("Compare directories", None),
+                (T("Swap panels"), self._swap_panels),
+                (T("Re-read both"), self._reread_both),
             ]
-        # col == 3 — Options (not wired yet, shown for parity with VC)
+        # col == 3 — Options
+        lang_tick = lambda code: "• " if self.i18n.lang == code else "  "
         return [
-            ("General...", None),
-            ("Interface...", None),
-            ("Panels...", None),
+            (T("Language"), [
+                (lang_tick(code) + name, (lambda c=code: self._set_lang(c)))
+                for code, name in LANGUAGES
+            ]),
             None,
-            ("Save setup", None),
+            (T("Save setup"), None),
         ]
+
+    def _set_lang(self, code: str) -> None:
+        self.i18n.set_lang(code)
 
     def _toggle_reverse(self, pi: int) -> None:
         self.panels[pi].sort_reverse = not self.panels[pi].sort_reverse
@@ -239,30 +264,55 @@ class VolkovData:
 
     def _open_menu(self) -> None:
         self.menu = [self.active * 4, 0]  # Left bar over left panel, Right over right
+        self.submenu = None
 
     def _menu_move_col(self, d: int) -> None:
+        self.submenu = None
         self.menu[0] = (self.menu[0] + d) % len(self.MENU_TITLES)
         self.menu[1] = 0
 
-    def _menu_move_row(self, d: int) -> None:
-        items = self._menu_items(self.menu[0])
-        r = self.menu[1]
+    @staticmethod
+    def _step_row(items: list, r: int, d: int) -> int:
         for _ in range(len(items)):           # step over separators
             r = (r + d) % len(items)
             if items[r] is not None:
                 break
-        self.menu[1] = r
+        return r
+
+    def _menu_move_row(self, d: int) -> None:
+        if self.submenu is not None:
+            items, cur, parent = self.submenu
+            self.submenu = (items, self._step_row(items, cur, d), parent)
+            return
+        items = self._menu_items(self.menu[0])
+        self.menu[1] = self._step_row(items, self.menu[1], d)
 
     def _menu_activate(self) -> None:
+        if self.submenu is not None:
+            items, cur, _parent = self.submenu
+            row = items[cur] if 0 <= cur < len(items) else None
+            self._close_menu()
+            self._run_menu_action(row)
+            return
         items = self._menu_items(self.menu[0])
         row = items[self.menu[1]] if 0 <= self.menu[1] < len(items) else None
+        if row is not None and isinstance(row[1], list):  # opens a submenu
+            self.submenu = (row[1], 0, self.menu[1])
+            return
+        self._close_menu()
+        self._run_menu_action(row)
+
+    def _close_menu(self) -> None:
         self.menu = None
+        self.submenu = None
+
+    def _run_menu_action(self, row) -> None:
         if row is None:
             return
         _label, action = row
         if action is None:
             self.overlay = ("message", "Menu", "This command is not implemented yet.")
-        else:
+        elif callable(action):
             action()
 
     @property
@@ -371,14 +421,14 @@ class VolkovData:
         xs, used = [], 0
         for name in self.MENU_TITLES:
             xs.append(used)
-            used += len(" " + name + " ")
+            used += len(" " + self.tr(name) + " ")
         return xs
 
     def _menubar(self, width: int) -> Fragments:
         frags: Fragments = []
         used = 0
         for i, name in enumerate(self.MENU_TITLES):
-            seg = " " + name + " "
+            seg = " " + self.tr(name) + " "
             opened = self.menu is not None and self.menu[0] == i
             frags.append(("class:menu-sel" if opened else "class:menu", seg))
             used += len(seg)
@@ -413,28 +463,47 @@ class VolkovData:
     def _draw_menu(self, screen: list[Fragments], width: int) -> None:
         col, cursor = self.menu
         items = self._menu_items(col)
-        labels = [("─" if it is None else it[0]) for it in items]
-        bw = max(len(s) for s in labels) + 2
+        # when a submenu is open, the parent box loses its highlight
+        active_cursor = None if self.submenu is not None else cursor
         x = self._menu_col_x()[col]
+        bw, x = self._draw_menu_box(screen, width, x, 1, items, active_cursor)
+        if self.submenu is not None:
+            sub_items, sub_cursor, parent_row = self.submenu
+            self._draw_menu_box(screen, width, x + bw + 2, 2 + parent_row,
+                                sub_items, sub_cursor)
+
+    def _draw_menu_box(self, screen, width, x, y, items, cursor):
+        """Draw one menu/submenu box at (x, y); return its (box_width, x).
+
+        An item whose action is a list is a submenu → it gets a '▶' marker.
+        """
+        def label_of(it):
+            if it is None:
+                return "─"
+            return it[0] + ("  ▶" if isinstance(it[1], list) else "")
+        labels = [label_of(it) for it in items]
+        bw = max(len(s) for s in labels) + 2
         if x + bw + 2 >= width:            # keep the box on-screen
             x = max(0, width - bw - 2)
         bd = "class:menu-border"
-        self._overlay_row(screen, 1, x, [(bd, TL + H * bw + TR)], width)
+        self._overlay_row(screen, y, x, [(bd, TL + H * bw + TR)], width)
         for j, it in enumerate(items):
             if it is None:
-                self._overlay_row(screen, 2 + j, x,
+                self._overlay_row(screen, y + 1 + j, x,
                                   [(bd, DL + DH * bw + DR)], width)
                 continue
             st = "class:menu-item-sel" if j == cursor else "class:menu-item"
-            self._overlay_row(screen, 2 + j, x,
-                              [(bd, V), (st, fit(" " + it[0], bw)), (bd, V)], width)
-        self._overlay_row(screen, 2 + len(items), x,
+            self._overlay_row(screen, y + 1 + j, x,
+                              [(bd, V), (st, fit(" " + label_of(it), bw)), (bd, V)],
+                              width)
+        self._overlay_row(screen, y + 1 + len(items), x,
                           [(bd, BL + H * bw + BR)], width)
         # drop shadow under the box
         sh = "class:shadow"
-        for r in range(2, 3 + len(items)):
+        for r in range(y + 1, y + 2 + len(items)):
             if x + bw + 2 < width:
                 self._overlay_row(screen, r, x + bw + 2, [(sh, " ")], width)
+        return bw, x
 
     # ── overlays ────────────────────────────────────────────────────────────
     def _draw_overlay(self, screen: list[Fragments], width: int, height: int) -> None:
@@ -631,6 +700,19 @@ class VolkovData:
         else:
             self._do_rename()
 
+    def _do_sql(self) -> None:
+        """Export the open MLA container to a SQLite .db in the other panel."""
+        be = self.panel.backend
+        if not isinstance(be, vc.MlaBackend):
+            self.overlay = ("message", "Export SQL", "Open an .mla container first.")
+            return
+        name = be.sqlite_name()
+        msg = (f"Export all records to SQLite\n  to  {self.other.backend.location}"
+               f"\n  as  '{name}'")
+        if self.other.backend.exists(name):
+            msg += f"\n\n! '{name}' exists and will be OVERWRITTEN."
+        self.overlay = ("confirm", "Export SQL", msg, "sql")
+
     def _do_mkdir(self) -> None:
         self.overlay = ("input", "Make directory", "New directory name:", "", "mkdir")
 
@@ -732,6 +814,10 @@ class VolkovData:
             elif action == "csv":
                 be = self.panel.backend
                 self.other.backend.put_file(be.csv_name(), be.to_csv())
+                self.other.reload()
+            elif action == "sql":
+                be = self.panel.backend
+                self.other.backend.put_file(be.sqlite_name(), be.to_sqlite())
                 self.other.reload()
         except vc.BackendError as exc:
             self.overlay = ("message", "Error", str(exc))
@@ -840,10 +926,16 @@ class VolkovData:
 
         # ── pull-down menu navigation ──
         @kb.add("left", filter=in_menu)
-        def _(e): self._menu_move_col(-1)
+        def _(e):
+            if self.submenu is not None:   # left = back out of the submenu
+                self.submenu = None
+            else:
+                self._menu_move_col(-1)
 
         @kb.add("right", filter=in_menu)
-        def _(e): self._menu_move_col(1)
+        def _(e):
+            if self.submenu is None:
+                self._menu_move_col(1)
 
         @kb.add("up", filter=in_menu)
         def _(e): self._menu_move_row(-1)
@@ -855,10 +947,14 @@ class VolkovData:
         def _(e): self._menu_activate()
 
         @kb.add("escape", filter=in_menu)
-        def _(e): self.menu = None
+        def _(e):
+            if self.submenu is not None:   # esc closes the submenu first
+                self.submenu = None
+            else:
+                self.menu = None
 
         @kb.add("f9", filter=in_menu)
-        def _(e): self.menu = None
+        def _(e): self._close_menu()
 
         @kb.add("q", filter=no_overlay)
         @kb.add("c-q")

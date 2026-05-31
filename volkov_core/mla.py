@@ -225,6 +225,52 @@ class MlaBackend(Backend):
         base = os.path.splitext(os.path.basename(self.path))[0]
         return base + ".csv"
 
+    def sqlite_name(self) -> str:
+        base = os.path.splitext(os.path.basename(self.path))[0]
+        return base + ".db"
+
+    def to_sqlite(self) -> bytes:
+        """Export the whole container as a SQLite database (one 'records' table).
+
+        SQLite is the simplest self-contained SQL target: the result is a single
+        .db file you can open in any SQL tool. This is intentionally a thin view
+        of the log — one flat table — not a normalised schema; the .mla stays the
+        source of truth and this is just a queryable mirror of it.
+        """
+        import sqlite3
+        import tempfile
+
+        # sqlite3 needs a real path; build in a temp file, then read the bytes back.
+        fd, tmp = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            con = sqlite3.connect(tmp)
+            try:
+                con.execute(
+                    "CREATE TABLE records ("
+                    "seq INTEGER, time TEXT, unix INTEGER, station INTEGER, "
+                    "channel INTEGER, type TEXT, length INTEGER, value TEXT)"
+                )
+                rows = []
+                for i, (rec, _data) in enumerate(self._records):
+                    ts = datetime.fromtimestamp(rec.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                    val = self.decode_value(Entry("", meta={"idx": i}))
+                    rows.append((rec.seq, ts, rec.timestamp, rec.station,
+                                 rec.channel, rec_type_name(rec.rec_type),
+                                 rec.length, val))
+                con.executemany(
+                    "INSERT INTO records VALUES (?,?,?,?,?,?,?,?)", rows)
+                con.commit()
+            finally:
+                con.close()
+            with open(tmp, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
     # ── F2 Repair — check the file and report ────────────────────────────────
     def repair_info(self) -> list[tuple[str, str]]:
         s = self._summary
