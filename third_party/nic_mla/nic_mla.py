@@ -16,7 +16,7 @@ bad-CRC lock (ignored) or a lock whose data block has no MAGIC (zeroed on mount)
 
 Design — a deliberately DUMB container:
   • LOG record 16 B: offset, timestamp, length, rec_type, kf_back, station,
-    reserved, crc16 — the WHOLE record is covered by the CRC.
+    reserved, mla_crc16 — the WHOLE record is covered by the CRC.
   • Abandon = overwrite the 16 B record with zeros; its CRC no longer matches,
     so readers skip it. No "flags outside the CRC" trick.
   • station is a 1-byte INDEX (1..255, 0 = none) into the station table in the
@@ -55,19 +55,19 @@ MLA_LOG_REC_SIZE   = 16                # B — log record (lock)
 MLA_DEFAULT_SIZE   = 1 << 20           # 1 MB — default file size
 
 # Integrity mode — prefix.flags (bits 0–1)
-CRC_NONE = 0  # no data CRC — the log CRC is always present
-CRC_DATA = 1  # CRC on data only
-CRC_FULL = 2  # CRC on both log and data — recommended
+MLA_CRC_NONE = 0  # no data CRC — the log CRC is always present
+MLA_CRC_DATA = 1  # CRC on data only
+MLA_CRC_FULL = 2  # CRC on both log and data — recommended
 
 # rec_type — low nibble = encoding, high nibble = class
-ENC_RAW       = 0x0   # uncompressed
-ENC_DELTA     = 0x1   # delta (compressed)
-ENC_KEYFRAME  = 0x2   # keyframe (compressed)
-ENC_TEXT      = 0x3   # text / JSON
+MLA_ENC_RAW       = 0x0   # uncompressed
+MLA_ENC_DELTA     = 0x1   # delta (compressed)
+MLA_ENC_KEYFRAME  = 0x2   # keyframe (compressed)
+MLA_ENC_TEXT      = 0x3   # text / JSON
 
-CLASS_MEASURE = 0x00  # measurement
-CLASS_EVENT   = 0x10  # event
-CLASS_CONFIG  = 0x20  # configuration
+MLA_CLASS_MEASURE = 0x00  # measurement
+MLA_CLASS_EVENT   = 0x10  # event
+MLA_CLASS_CONFIG  = 0x20  # configuration
 
 # Self-describing tables embedded in the prefix free space, covered by the
 # prefix CRC. Built/read by tools/mla_schema.py (host-only).
@@ -118,10 +118,10 @@ def _prefix_byte_len(schema_len: int, station_len: int) -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 #  CRC-16 / CCITT-FALSE
 #  poly=0x1021  init=0xFFFF  refin=False  refout=False  xorout=0x0000
-#  Test vector: crc16(b"123456789") == 0x29B1
+#  Test vector: mla_crc16(b"123456789") == 0x29B1
 # ──────────────────────────────────────────────────────────────────────────────
 
-def crc16(data: bytes, init: int = 0xFFFF) -> int:
+def mla_crc16(data: bytes, init: int = 0xFFFF) -> int:
     crc = init
     for b in data:
         crc ^= b << 8
@@ -129,7 +129,7 @@ def crc16(data: bytes, init: int = 0xFFFF) -> int:
             crc = ((crc << 1) ^ 0x1021 if crc & 0x8000 else crc << 1) & 0xFFFF
     return crc
 
-assert crc16(b"123456789") == 0x29B1, "CRC16 self-test FAILED — check the implementation!"
+assert mla_crc16(b"123456789") == 0x29B1, "CRC16 self-test FAILED — check the implementation!"
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Prefix
@@ -151,7 +151,7 @@ assert crc16(b"123456789") == 0x29B1, "CRC16 self-test FAILED — check the impl
 #    [33]  reserved1        1 B   reserved (0)
 #    [34]  SCHEMA table     …     (see tools/mla_schema.py)
 #    [..]  STATION table    …
-#    [end-2] crc16          2 B   LE  — over everything before it
+#    [end-2] mla_crc16          2 B   LE  — over everything before it
 # ──────────────────────────────────────────────────────────────────────────────
 
 _PFX_FMT1 = "<4sBBBBIQ"   # bytes [0..19]   (20 B)
@@ -163,7 +163,7 @@ class MlaPrefix:
     version:        int   = MLA_VERSION
     cluster_shift:  int   = 12
     log_rec_size:   int   = MLA_LOG_REC_SIZE
-    flags:          int   = CRC_FULL
+    flags:          int   = MLA_CRC_FULL
     file_size:      int   = MLA_DEFAULT_SIZE
     reserved8:      int   = 0
     container_kind: int   = 0
@@ -212,7 +212,7 @@ class MlaPrefix:
             off += len(self.schema_table)
         if self.station_table:
             buf[off:off + len(self.station_table)] = self.station_table
-        return bytes(buf) + struct.pack("<H", crc16(bytes(buf)))
+        return bytes(buf) + struct.pack("<H", mla_crc16(bytes(buf)))
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> MlaPrefix:
@@ -228,10 +228,10 @@ class MlaPrefix:
             raise ValueError(f"Prefix: need {size} B, got {len(raw)}")
         body = size - 2
         crc_stored = struct.unpack_from("<H", raw, body)[0]
-        if crc16(raw[:body]) != crc_stored:
+        if mla_crc16(raw[:body]) != crc_stored:
             raise ValueError(
                 f"Prefix: bad CRC (stored {crc_stored:#06x}, "
-                f"computed {crc16(raw[:body]):#06x})"
+                f"computed {mla_crc16(raw[:body]):#06x})"
             )
         f1 = struct.unpack_from(_PFX_FMT1, raw, 0)
         if f1[0] != MLA_MAGIC:
@@ -261,7 +261,7 @@ class MlaPrefix:
 #    [11] kf_back    1 B  uint8  — records back to the owning keyframe (0 = is one)
 #    [12] station    1 B  uint8  — index 1..255 into the station table (0 = none)
 #    [13] reserved   1 B  uint8  — 0x00
-#    [14] crc16      2 B  uint16 — over bytes 0..13
+#    [14] mla_crc16      2 B  uint16 — over bytes 0..13
 #
 #  A record is VALID iff its stored CRC matches. An empty slot (all 0xFF) and an
 #  abandoned slot (all 0x00) both fail the CRC, so both are skipped.
@@ -275,7 +275,7 @@ class MlaLog:
     offset:    int
     timestamp: int
     length:    int = 0
-    rec_type:  int = ENC_RAW
+    rec_type:  int = MLA_ENC_RAW
     kf_back:   int = 0
     station:   int = 0
     reserved:  int = 0
@@ -286,14 +286,14 @@ class MlaLog:
                            self.offset, self.timestamp, self.length,
                            self.rec_type, self.kf_back, self.station,
                            self.reserved)
-        return body + struct.pack("<H", crc16(body))
+        return body + struct.pack("<H", mla_crc16(body))
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> tuple[MlaLog, bool]:
         """Deserialize. Returns (record, crc_ok)."""
         f = struct.unpack_from(_LOG_FMT, raw)
         crc_stored = struct.unpack_from("<H", raw, _LOG_CRC_LEN)[0]
-        crc_ok = crc16(raw[:_LOG_CRC_LEN]) == crc_stored
+        crc_ok = mla_crc16(raw[:_LOG_CRC_LEN]) == crc_stored
         return cls(offset=f[0], timestamp=f[1], length=f[2], rec_type=f[3],
                    kf_back=f[4], station=f[5], reserved=f[6]), crc_ok
 
@@ -425,7 +425,7 @@ class MlaCore:
     def format(self,
                file_size:      int = MLA_DEFAULT_SIZE,
                cluster_shift:  int = 12,
-               crc_mode:       int = CRC_FULL,
+               crc_mode:       int = MLA_CRC_FULL,
                keyframe_intv:  int = 8,
                container_kind: int = 0,
                file_seq:       int = 0,
@@ -511,7 +511,7 @@ class MlaCore:
     # ── Write ──────────────────────────────────────────────────────────────────
 
     def append(self, timestamp: int, station: int, data: bytes,
-               rec_type: int = ENC_RAW, kf_back: int = 0) -> None:
+               rec_type: int = MLA_ENC_RAW, kf_back: int = 0) -> None:
         """
         Append a data record. Commit protocol: LOCK first, DATA second.
 
@@ -544,7 +544,7 @@ class MlaCore:
 
     def _build_block(self, data: bytes) -> bytes:
         """Assemble a data block: MAGIC + data + CRC16 (or 0xFFFF when no CRC)."""
-        crc = crc16(data) if self._prefix.flags & 0x3 >= CRC_DATA else 0xFFFF
+        crc = mla_crc16(data) if self._prefix.flags & 0x3 >= MLA_CRC_DATA else 0xFFFF
         return MLA_DATA_MAGIC + data + struct.pack("<H", crc)
 
     # ── Read ───────────────────────────────────────────────────────────────────
@@ -564,9 +564,9 @@ class MlaCore:
         if raw[:2] != MLA_DATA_MAGIC:
             raise ValueError(f"Bad MAGIC at offset {rec.offset:#010x}")
         data = raw[2:2 + rec.length]
-        if self._prefix.flags & 0x3 >= CRC_DATA:
+        if self._prefix.flags & 0x3 >= MLA_CRC_DATA:
             crc_s = struct.unpack_from("<H", raw, 2 + rec.length)[0]
-            if crc16(data) != crc_s:
+            if mla_crc16(data) != crc_s:
                 raise ValueError(f"Bad data CRC at offset {rec.offset:#010x}")
         return data
 
@@ -606,14 +606,14 @@ class MlaCore:
     def recover(self) -> int:
         """
         Emergency log recovery by scanning the data region for MAGIC + a valid
-        data CRC. Rebuilds the log (timestamp=0, station=0). Requires CRC_DATA or
-        CRC_FULL. Slow — emergency use only. Returns the number of records.
+        data CRC. Rebuilds the log (timestamp=0, station=0). Requires MLA_CRC_DATA or
+        MLA_CRC_FULL. Slow — emergency use only. Returns the number of records.
         """
         self._prefix = self._read_prefix()
         fs = self._prefix.file_size
         rs = self._prefix.log_rec_size
-        if self._prefix.flags & 0x3 < CRC_DATA:
-            raise RuntimeError("Recovery requires CRC_DATA or CRC_FULL")
+        if self._prefix.flags & 0x3 < MLA_CRC_DATA:
+            raise RuntimeError("Recovery requires MLA_CRC_DATA or MLA_CRC_FULL")
 
         db = self._prefix.data_base
         recovered: list[MlaLog] = []
@@ -630,7 +630,7 @@ class MlaCore:
                 block = self._hal.read(pos, 2 + length + 2)
                 data  = block[2:2 + length]
                 crc_s = struct.unpack_from("<H", block, 2 + length)[0]
-                if crc16(data) == crc_s:
+                if mla_crc16(data) == crc_s:
                     recovered.append(MlaLog(offset=pos, timestamp=0, length=length))
                     data_end = end
                     pos = end

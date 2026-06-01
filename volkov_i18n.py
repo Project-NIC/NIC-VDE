@@ -11,7 +11,7 @@ the English UI strings as written in the code; values are the translations.
 from __future__ import annotations
 
 # Languages offered in Options → Language (code, native name).
-LANGUAGES = [
+VDE_LANGUAGES = [
     ("en", "English"),
     ("cs", "Čeština"),
     ("fr", "Français"),
@@ -98,7 +98,7 @@ TABLES: dict[str, dict[str, str]] = {
 }
 
 
-class Translator:
+class VdeTranslator:
     """Holds the active language and translates UI strings."""
 
     def __init__(self, lang: str = "en"):

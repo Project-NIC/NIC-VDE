@@ -43,8 +43,8 @@ Usage:
     python3 tools/mla_schema.py        # builds the example, writes c/mla_schema_table.h
 
     # or drive it yourself:
-    from mla_schema import SchemaBuilder
-    sb = SchemaBuilder()
+    from mla_schema import MlaSchemaBuilder
+    sb = MlaSchemaBuilder()
     sb.log("datetime"); sb.log("station"); sb.log("region")
     sb.data("temp_in", unit="degC", width=2, exp10=-1, signed=True)
     sb.emit_c("c/mla_schema_table.h")
@@ -72,7 +72,7 @@ MLA_STATION_VER = 0x53                    # station table tag (distinct from sch
 MLA_STATION_REC = 6                       # raw bytes per station (meaning = host glue's)
 
 
-def prefix_byte_len(schema_len: int, station_len: int = 0) -> int:
+def mla_prefix_byte_len(schema_len: int, station_len: int = 0) -> int:
     """Total prefix size (CRC included) for the given table sizes.
 
     Normally 512 B (tables fit a single sector, CRC at [510]). If they overflow,
@@ -104,11 +104,11 @@ UNITS: dict[str, int] = {
     "ppm":    16, "lux": 17, "m_s": 18,   # m/s
     "mm":     19, "count": 20,
 }
-UNIT_NAME = {v: k for k, v in UNITS.items()}
+MLA_UNIT_NAME = {v: k for k, v in UNITS.items()}
 
 
 @dataclass(frozen=True)
-class Field:
+class MlaField:
     name:   str          # column name — up to MLA_NAME_LEN bytes, carried on the wire
     width:  int          # 1 / 2 / 4
     unit:   str          # key into UNITS
@@ -140,8 +140,8 @@ class Field:
         return core + self.name_bytes()
 
     @classmethod
-    def from_descriptor(cls, buf: bytes, name: str = "") -> "Field":
-        """Inverse of descriptor(): decode a 14 B descriptor back to a Field.
+    def from_descriptor(cls, buf: bytes, name: str = "") -> "MlaField":
+        """Inverse of descriptor(): decode a 14 B descriptor back to a MlaField.
 
         The name is read from [6:14]; if it is blank, the `name` argument (e.g. a
         generated placeholder) is used instead.
@@ -149,7 +149,7 @@ class Field:
         if len(buf) < MLA_FIELD_SIZE:
             raise ValueError(f"descriptor: need {MLA_FIELD_SIZE} B, got {len(buf)}")
         width, unit_code, exp10_raw, flags = buf[0], buf[1], buf[2], buf[3]
-        if unit_code not in UNIT_NAME:
+        if unit_code not in MLA_UNIT_NAME:
             raise ValueError(f"descriptor: unknown unit code {unit_code}")
         exp10  = exp10_raw - 256 if exp10_raw >= 128 else exp10_raw          # signed byte
         off    = buf[4] | (buf[5] << 8)
@@ -157,13 +157,13 @@ class Field:
         embedded = buf[MLA_FIELD_CORE:MLA_FIELD_SIZE].split(b"\x00", 1)[0]
         if embedded:
             name = embedded.decode("utf-8", "replace")
-        return cls(name=name, width=width, unit=UNIT_NAME[unit_code],
+        return cls(name=name, width=width, unit=MLA_UNIT_NAME[unit_code],
                    exp10=exp10, signed=bool(flags & 0x01), offset=offset)
 
 
-# ── Field presets (handy names for common data fields) ───────────────────────
-PRESETS: dict[str, Field] = {
-    "datetime": Field("datetime", 4, "unix_s"),
+# ── MlaField presets (handy names for common data fields) ───────────────────────
+MLA_SCHEMA_PRESETS: dict[str, MlaField] = {
+    "datetime": MlaField("datetime", 4, "unix_s"),
 }
 
 
@@ -173,7 +173,7 @@ PRESETS: dict[str, Field] = {
 #  links this module can decode a station's records WITHOUT prior knowledge.
 #  Pure host code — the write-only MCU path never uses it.
 
-def schema_byte_len(prefix: bytes) -> int:
+def mla_schema_byte_len(prefix: bytes) -> int:
     """Total on-the-wire length of the embedded schema table (0 if none).
 
     The table is self-sizing from its 3 B header, so this works on just the
@@ -187,7 +187,7 @@ def schema_byte_len(prefix: bytes) -> int:
     return 3 + MLA_FIELD_SIZE * (n_log + n_data)
 
 
-def read_schema(prefix: bytes) -> tuple[list[Field] | None, list[Field] | None]:
+def mla_read_schema(prefix: bytes) -> tuple[list[MlaField] | None, list[MlaField] | None]:
     """Decode the schema table from a prefix (512 B, or larger if extended).
 
     Reads from offset MLA_SCHEMA_OFF (34):
@@ -215,11 +215,11 @@ def read_schema(prefix: bytes) -> tuple[list[Field] | None, list[Field] | None]:
         raise ValueError("schema: truncated descriptors")
 
     pos = MLA_SCHEMA_OFF + 3
-    def take(count: int, label: str) -> list[Field]:
+    def take(count: int, label: str) -> list[MlaField]:
         nonlocal pos
         out = []
         for i in range(count):
-            out.append(Field.from_descriptor(prefix[pos:pos + MLA_FIELD_SIZE],
+            out.append(MlaField.from_descriptor(prefix[pos:pos + MLA_FIELD_SIZE],
                                              name=f"{label}{i}"))
             pos += MLA_FIELD_SIZE
         return out
@@ -227,7 +227,7 @@ def read_schema(prefix: bytes) -> tuple[list[Field] | None, list[Field] | None]:
     return take(n_log, "log"), take(n_data, "data")
 
 
-def decode_value(field: Field, raw_bytes: bytes) -> float | int:
+def mla_decode_value(field: MlaField, raw_bytes: bytes) -> float | int:
     """Decode one packed field: physical = (raw + offset) * 10**exp10.
 
     raw_bytes must be exactly field.width bytes (little-endian). The result is
@@ -242,7 +242,7 @@ def decode_value(field: Field, raw_bytes: bytes) -> float | int:
     return scaled * (10 ** field.exp10 if field.exp10 > 0 else 10.0 ** field.exp10)
 
 
-def decode_payload(data_fields: list[Field],
+def mla_decode_payload(data_fields: list[MlaField],
                    payload: bytes) -> list[tuple[str, str, float | int]]:
     """Split a packed data payload by field width and decode each value.
 
@@ -255,7 +255,7 @@ def decode_payload(data_fields: list[Field],
         raise ValueError(f"payload {len(payload)} B does not match schema width {total} B")
     out, pos = [], 0
     for f in data_fields:
-        out.append((f.name, f.unit, decode_value(f, payload[pos:pos + f.width])))
+        out.append((f.name, f.unit, mla_decode_value(f, payload[pos:pos + f.width])))
         pos += f.width
     return out
 
@@ -270,7 +270,7 @@ def decode_payload(data_fields: list[Field],
 #     [1] n        1B  number of stations (1..255); index i (1..n) → record i-1
 #     [2 ..]           n × 6 B raw records
 
-class StationTable:
+class MlaStationTable:
     """Collect station records (6 raw bytes each) and emit the binary table.
 
     The 6 bytes are opaque to MLA. Two convenience encoders are offered for the
@@ -281,7 +281,7 @@ class StationTable:
     def __init__(self) -> None:
         self.records: list[bytes] = []
 
-    def raw(self, six: bytes) -> "StationTable":
+    def raw(self, six: bytes) -> "MlaStationTable":
         if len(six) != MLA_STATION_REC:
             raise ValueError(f"station record must be {MLA_STATION_REC} B, got {len(six)}")
         if len(self.records) >= 255:
@@ -290,7 +290,7 @@ class StationTable:
         return self
 
     def station(self, region: int = 0, number: int = 0,
-                reserved: int = 0xFFFF) -> "StationTable":
+                reserved: int = 0xFFFF) -> "MlaStationTable":
         """Convenience: region(2) + number(2) + reserved(2), all u16 LE."""
         for name, v in (("region", region), ("number", number), ("reserved", reserved)):
             if not 0 <= v <= 0xFFFF:
@@ -306,20 +306,20 @@ class StationTable:
         return bytes([MLA_STATION_VER, n]) + b"".join(self.records)
 
 
-def station_byte_len(prefix: bytes, off: int) -> int:
+def mla_station_byte_len(prefix: bytes, off: int) -> int:
     """Length of the station table starting at `off` (0 if none)."""
     if len(prefix) < off + 2 or prefix[off] != MLA_STATION_VER:
         return 0
     return 2 + MLA_STATION_REC * prefix[off + 1]
 
 
-def read_stations(prefix: bytes) -> list[bytes] | None:
+def mla_read_stations(prefix: bytes) -> list[bytes] | None:
     """Decode the station table → list of 6-byte records (None if absent).
 
     Index i in the log (1..n) maps to records[i-1]; index 0 means "no station".
     The 6 bytes stay raw — the host glue translates them.
     """
-    slen = schema_byte_len(prefix)
+    slen = mla_schema_byte_len(prefix)
     off  = MLA_SCHEMA_OFF + slen
     if len(prefix) < off + 2 or prefix[off] != MLA_STATION_VER:
         return None
@@ -331,15 +331,15 @@ def read_stations(prefix: bytes) -> list[bytes] | None:
                          off + 2 + (i + 1) * MLA_STATION_REC]) for i in range(n)]
 
 
-def split_station(record: bytes) -> tuple[int, int, int]:
-    """Convenience inverse of StationTable.station(): (region, number, reserved)."""
+def mla_split_station(record: bytes) -> tuple[int, int, int]:
+    """Convenience inverse of MlaStationTable.station(): (region, number, reserved)."""
     if len(record) != MLA_STATION_REC:
         raise ValueError(f"station record must be {MLA_STATION_REC} B")
     return struct.unpack("<HHH", record)
 
 
 # ── Builder ────────────────────────────────────────────────────
-class SchemaBuilder:
+class MlaSchemaBuilder:
     """Configure the schema by adding fields, then emit the table.
 
     Use .log(...) for the (fixed) LOG-header fields and .data(...) for the
@@ -347,23 +347,23 @@ class SchemaBuilder:
     """
 
     def __init__(self) -> None:
-        self.log_fields:  list[Field] = []
-        self.data_fields: list[Field] = []
+        self.log_fields:  list[MlaField] = []
+        self.data_fields: list[MlaField] = []
 
-    def _make(self, name, unit, width, exp10, signed, offset) -> Field:
-        if unit is None and name in PRESETS:      # preset by name
-            return PRESETS[name]
+    def _make(self, name, unit, width, exp10, signed, offset) -> MlaField:
+        if unit is None and name in MLA_SCHEMA_PRESETS:      # preset by name
+            return MLA_SCHEMA_PRESETS[name]
         if unit is None:
             raise ValueError(f"'{name}' is not a preset — give unit/width explicitly")
-        return Field(name, width, unit, exp10, signed, offset)
+        return MlaField(name, width, unit, exp10, signed, offset)
 
     def log(self, name, *, unit=None, width=2, exp10=0, signed=False,
-            offset=0) -> "SchemaBuilder":
+            offset=0) -> "MlaSchemaBuilder":
         self.log_fields.append(self._make(name, unit, width, exp10, signed, offset))
         return self
 
     def data(self, name, *, unit=None, width=2, exp10=0, signed=False,
-             offset=0) -> "SchemaBuilder":
+             offset=0) -> "MlaSchemaBuilder":
         self.data_fields.append(self._make(name, unit, width, exp10, signed, offset))
         return self
 
@@ -381,16 +381,16 @@ class SchemaBuilder:
         for f in self.log_fields + self.data_fields:
             out += f.descriptor()
         # A table that overflows the base 512 B prefix grows it in 512 B sectors
-        # (CRC moves to the new end); prefix_byte_len() caps it at 255 sectors.
-        prefix_byte_len(len(out))
+        # (CRC moves to the new end); mla_prefix_byte_len() caps it at 255 sectors.
+        mla_prefix_byte_len(len(out))
         return out
 
     def prefix_size(self, station_len: int = 0) -> int:
         """Total prefix size (B) needed to carry this table (+ optional station)."""
-        return prefix_byte_len(len(self.table()), station_len)
+        return mla_prefix_byte_len(len(self.table()), station_len)
 
     def describe(self) -> str:
-        def row(f: Field) -> str:
+        def row(f: MlaField) -> str:
             scale = "" if f.exp10 == 0 else f"  ×10^{f.exp10}"
             off = "" if f.offset == 0 else f"  {f.offset:+d}"
             sign = "i" if f.signed else "u"
@@ -459,7 +459,7 @@ const uint8_t mla_schema_table[MLA_SCHEMA_TABLE_LEN] = {{ {rows} }};
 
 # ── Example / CLI ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    sb = SchemaBuilder()
+    sb = MlaSchemaBuilder()
 
     # ── EDIT HERE — add as many fields as you need ─────────
     # LOG header: the datetime field describes the log record's timestamp.
@@ -482,7 +482,7 @@ if __name__ == "__main__":
 
     # STATION table: index 1..n → (region, number). Filled by the host glue;
     # here just an example of a few stations in one region.
-    st = StationTable()
+    st = MlaStationTable()
     st.station(region=55, number=25000)    # index 1
     st.station(region=55, number=25001)    # index 2
     st.station(region=55, number=25777)    # index 3 — gaps are fine

@@ -21,11 +21,11 @@ import sys
 _MLA = os.path.join(os.path.dirname(__file__), "..", "third_party", "nic_mla")
 sys.path.insert(0, _MLA)
 sys.path.insert(0, os.path.join(_MLA, "tools"))
-from nic_mla import MlaCore, MlaPosixHAL, ENC_RAW, CLASS_MEASURE, CLASS_EVENT  # noqa: E402
-from mla_schema import SchemaBuilder, StationTable  # noqa: E402
+from nic_mla import MlaCore, MlaPosixHAL, MLA_ENC_RAW, MLA_CLASS_MEASURE, MLA_CLASS_EVENT  # noqa: E402
+from mla_schema import MlaSchemaBuilder, MlaStationTable  # noqa: E402
 
-RT_MEASURE = CLASS_MEASURE | ENC_RAW
-RT_EVENT = CLASS_EVENT | ENC_RAW
+RT_MEASURE = MLA_CLASS_MEASURE | MLA_ENC_RAW
+RT_EVENT = MLA_CLASS_EVENT | MLA_ENC_RAW
 
 # DATA schema — one entry per sensor value, packed in this order.
 # (name, unit, width, exp10, signed, base, swing)  — base/swing are sim params.
@@ -44,7 +44,7 @@ N_ROUNDS = 60
 
 
 def build_schema() -> bytes:
-    sb = SchemaBuilder()
+    sb = MlaSchemaBuilder()
     sb.log("datetime")
     for name, unit, width, exp10, signed, _b, _s in SENSORS:
         sb.data(name, unit=unit, width=width, exp10=exp10, signed=signed)
@@ -52,7 +52,7 @@ def build_schema() -> bytes:
 
 
 def build_stations() -> bytes:
-    st = StationTable()
+    st = MlaStationTable()
     for region, number in STATIONS:
         st.station(region=region, number=number)
     return st.table()

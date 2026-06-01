@@ -11,6 +11,12 @@ Volkov Data reads/browses.
   (`nic_mla.py`) and the host-only tooling (`tools/mla_schema.py`), kept
   byte-identical to the C core (`c/`). One source of truth lives next to the app.
 
+> **Local change:** the public-API name-alignment rename is applied here, which
+> brings the Python names *closer* to the C core (the C already uses `MLA_ENC_*`,
+> `MLA_CRC_*`, `MLA_CLASS_*`); plus `mla_crc16`, `MlaSchemaBuilder`,
+> `MlaStationTable`, `mla_read_schema`, … Re-vendor from upstream once the
+> matching rename patch lands there.
+
 ## The "dumb container" model (v1.0)
 
 MLA is deliberately **dumb**: it stores bytes and never interprets their meaning.
@@ -30,8 +36,8 @@ The prefix grows in whole 512 B sectors to fit the tables.
 - `nic_mla.py` — `MlaCore` (format / mount / append / read_record / iterate /
   scan / recover) + `MlaLog` (16 B) + `MlaPrefix`.
 - `tools/mla_schema.py` — host-only builders **and readers**:
-  `read_schema(prefix)`, `decode_value`, `decode_payload`, `read_stations(prefix)`,
-  `split_station(record)`, plus `SchemaBuilder` / `StationTable` and the universal
+  `mla_read_schema(prefix)`, `mla_decode_value`, `mla_decode_payload`, `mla_read_stations(prefix)`,
+  `mla_split_station(record)`, plus `MlaSchemaBuilder` / `MlaStationTable` and the universal
   `UNITS` vocabulary.
 
 ## Updating

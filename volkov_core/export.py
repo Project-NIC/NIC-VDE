@@ -20,7 +20,7 @@ def _csv_cell(v) -> str:
     return str(v).replace(",", ";").replace("\n", " ").replace("\r", " ")
 
 
-def to_csv(headers: Sequence[str], rows: Iterable[Sequence]) -> bytes:
+def vde_to_csv(headers: Sequence[str], rows: Iterable[Sequence]) -> bytes:
     """Serialise rows to CSV (UTF-8). Cells are sanitised to stay one-per-column."""
     out = [",".join(_csv_cell(h) for h in headers)]
     for row in rows:
@@ -41,7 +41,7 @@ def _sql_ident(name: str, used: set) -> str:
     return ident
 
 
-def to_sqlite(columns: Sequence[tuple[str, str]], rows: Iterable[Sequence],
+def vde_to_sqlite(columns: Sequence[tuple[str, str]], rows: Iterable[Sequence],
               table: str = "records") -> bytes:
     """Serialise rows to a single-table SQLite database, returned as bytes.
 

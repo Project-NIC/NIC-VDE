@@ -11,7 +11,7 @@ Covers:
   • Torn data write  (lock OK, data MAGIC missing — zeroed on mount)
   • Abandon-by-zeroing (a zeroed record fails the CRC and is skipped)
   • Emergency recovery (recover())
-  • File rotation + host-side query (MlaArchive)
+  • File rotation + host-side mla_query (MlaArchive)
   • Self-describing SCHEMA table (names/units → CSV/SQL) round-trip
   • STATION table (index → raw record) round-trip
   • Extended prefix (tables overflow one 512 B sector; CRC moves)
@@ -30,13 +30,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "too
 
 from nic_mla import (
     MlaCore, MlaPosixHAL, MlaPrefix, MlaLog,
-    crc16, CRC_FULL, CRC_NONE, MLA_PREFIX_SIZE, MLA_LOG_REC_SIZE,
+    mla_crc16, MLA_CRC_FULL, MLA_CRC_NONE, MLA_PREFIX_SIZE, MLA_LOG_REC_SIZE,
     MLA_DATA_MAGIC, MLA_MAX_PREFIX_SEC,
 )
-from nic_mla_archive import MlaArchive, query
+from nic_mla_archive import MlaArchive, mla_query
 from mla_schema import (
-    SchemaBuilder, StationTable,
-    read_schema, read_stations, decode_value, decode_payload, split_station,
+    MlaSchemaBuilder, MlaStationTable,
+    mla_read_schema, mla_read_stations, mla_decode_value, mla_decode_payload, mla_split_station,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -71,12 +71,12 @@ def fresh_posix() -> MlaPosixHAL:
 
 def test_crc():
     section("CRC-16 / CCITT-FALSE")
-    check("test vector 0x29B1", crc16(b"123456789") == 0x29B1)
-    check("empty data (init=0xFFFF)", crc16(b"") == 0xFFFF)
-    check("single zero byte", crc16(b"\x00") == 0xE1F0)
+    check("test vector 0x29B1", mla_crc16(b"123456789") == 0x29B1)
+    check("empty data (init=0xFFFF)", mla_crc16(b"") == 0xFFFF)
+    check("single zero byte", mla_crc16(b"\x00") == 0xE1F0)
     # A zeroed 14 B log body must NOT collide with a stored CRC of 0x0000,
     # otherwise an abandoned (all-zero) record would look valid.
-    check("zeroed record fails CRC", crc16(bytes(14)) != 0x0000)
+    check("zeroed record fails CRC", mla_crc16(bytes(14)) != 0x0000)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -85,14 +85,14 @@ def test_crc():
 
 def test_prefix():
     section("Prefix serialize / deserialize")
-    p = MlaPrefix(file_size=_SZ, cluster_shift=8, flags=CRC_FULL)
+    p = MlaPrefix(file_size=_SZ, cluster_shift=8, flags=MLA_CRC_FULL)
     raw = p.to_bytes()
     check("length 512 B", len(raw) == 512)
 
     p2 = MlaPrefix.from_bytes(raw)
     check("round-trip magic",       p2.magic == p.magic)
     check("round-trip file_size",   p2.file_size == _SZ)
-    check("round-trip flags",       p2.flags == CRC_FULL)
+    check("round-trip flags",       p2.flags == MLA_CRC_FULL)
     check("round-trip cluster_sh",  p2.cluster_shift == 8)
     check("data_base == prefix",    p2.data_base == 512)
 
@@ -151,7 +151,7 @@ def test_roundtrip():
     section("append() → mount() round-trip")
     payloads = [bytes([i] * (3 + i)) for i in range(5)]
     with fresh_posix() as hal:
-        mla = MlaCore(hal); mla.format(file_size=_SZ, crc_mode=CRC_FULL)
+        mla = MlaCore(hal); mla.format(file_size=_SZ, crc_mode=MLA_CRC_FULL)
         for i, p in enumerate(payloads):
             mla.append(1700000000 + i, station=1 + i, data=p)
         check("5 records written", mla.record_count == 5)
@@ -267,7 +267,7 @@ def test_recovery():
     section("Emergency recovery — recover()")
     payloads = [bytes([i * 13 % 256] * (8 + i)) for i in range(5)]
     with fresh_posix() as hal:
-        mla = MlaCore(hal); mla.format(file_size=_SZ, crc_mode=CRC_FULL)
+        mla = MlaCore(hal); mla.format(file_size=_SZ, crc_mode=MLA_CRC_FULL)
         for i, p in enumerate(payloads):
             mla.append(1700000000 + i, station=1, data=p)
         bot = mla._bot_ptr
@@ -281,11 +281,11 @@ def test_recovery():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  7. Rotation + query
+#  7. Rotation + mla_query
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_rotation_and_query():
-    section("Rotation (MlaArchive) + host-side query")
+    section("Rotation (MlaArchive) + host-side mla_query")
     import tempfile, shutil
     tmp = tempfile.mkdtemp(prefix="nic_mla_arch_")
     try:
@@ -296,10 +296,10 @@ def test_rotation_and_query():
         ro = MlaArchive(tmp, file_size=2048)
         check("multiple files created", ro.file_count > 1)
         check("all 300 records read", ro.total_records == 300)
-        check("query by station index",
-              sum(1 for _ in query(ro, station=2)) == 75)
-        win = list(query(ro, time_from=1_600_000_010, time_to=1_600_000_020))
-        check("query by time window", len(win) == 11)
+        check("mla_query by station index",
+              sum(1 for _ in mla_query(ro, station=2)) == 75)
+        win = list(mla_query(ro, time_from=1_600_000_010, time_to=1_600_000_020))
+        check("mla_query by time window", len(win) == 11)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -308,8 +308,8 @@ def test_rotation_and_query():
 #  8. Self-describing schema (names/units for CSV/SQL)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _example_schema() -> SchemaBuilder:
-    sb = SchemaBuilder()
+def _example_schema() -> MlaSchemaBuilder:
+    sb = MlaSchemaBuilder()
     sb.log("datetime")
     sb.data("temp_in",  unit="degC", width=2, exp10=-1, signed=True, offset=-15)
     sb.data("humidity", unit="pct",  width=2, exp10=-1)
@@ -324,34 +324,34 @@ def test_schema():
     prefix = MlaPrefix(file_size=_SZ, schema_table=table).to_bytes()
     check("prefix still 512 B", len(prefix) == 512)
 
-    log_f, data_f = read_schema(prefix)
-    check("read_schema n_log",  log_f is not None and len(log_f) == 1)
-    check("read_schema n_data", data_f is not None and len(data_f) == 3)
+    log_f, data_f = mla_read_schema(prefix)
+    check("mla_read_schema n_log",  log_f is not None and len(log_f) == 1)
+    check("mla_read_schema n_data", data_f is not None and len(data_f) == 3)
     check("8-char names recovered",
           [f.name for f in data_f] == ["temp_in", "humidity", "energy"])
     check("units recovered",
           [f.unit for f in data_f] == ["degC", "pct", "kWh"])
 
     raw = (250).to_bytes(2, "little", signed=True)        # temp_in raw = 250
-    check("decode_value temp_in", abs(decode_value(data_f[0], raw) - 23.5) < 1e-9)
+    check("mla_decode_value temp_in", abs(mla_decode_value(data_f[0], raw) - 23.5) < 1e-9)
 
     payload = raw + (550).to_bytes(2, "little") + (1234).to_bytes(4, "little")
-    decoded = decode_payload(data_f, payload)
-    check("decode_payload shape",
+    decoded = mla_decode_payload(data_f, payload)
+    check("mla_decode_payload shape",
           [(n, u) for n, u, _ in decoded]
           == [("temp_in", "degC"), ("humidity", "pct"), ("energy", "kWh")])
-    check("decode_payload values",
+    check("mla_decode_payload values",
           abs(decoded[0][2] - 23.5) < 1e-9 and abs(decoded[1][2] - 55.0) < 1e-9
           and decoded[2][2] == 1234)
     try:
-        decode_payload(data_f, payload + b"\x00")
-        check("decode_payload rejects bad length", False, "no ValueError")
+        mla_decode_payload(data_f, payload + b"\x00")
+        check("mla_decode_payload rejects bad length", False, "no ValueError")
     except ValueError:
-        check("decode_payload rejects bad length", True)
+        check("mla_decode_payload rejects bad length", True)
 
     # No-schema file → (None, None)
     plain = MlaPrefix(file_size=_SZ).to_bytes()
-    check("no-schema → (None, None)", read_schema(plain) == (None, None))
+    check("no-schema → (None, None)", mla_read_schema(plain) == (None, None))
 
     # End-to-end through format()/mount()
     hal = MlaPosixHAL.create(_TMP, _SZ)
@@ -361,9 +361,9 @@ def test_schema():
     with MlaPosixHAL(_TMP) as hal:
         m2 = MlaCore(hal); m2.mount()
         check("mount recovers schema", m2._prefix.schema_table == table)
-        _, df = read_schema(m2._prefix.to_bytes())
+        _, df = mla_read_schema(m2._prefix.to_bytes())
         rec = list(m2)[0]
-        check("end-to-end decode", decode_payload(df, rec[1])[0][2] == 23.5)
+        check("end-to-end decode", mla_decode_payload(df, rec[1])[0][2] == 23.5)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -372,7 +372,7 @@ def test_schema():
 
 def test_station_table():
     section("Station table — index → station number")
-    st = StationTable()
+    st = MlaStationTable()
     st.station(region=55, number=25000)    # index 1
     st.station(region=55, number=25001)    # index 2
     st.station(region=55, number=25777)    # index 3 (gap is fine)
@@ -381,14 +381,14 @@ def test_station_table():
     prefix = MlaPrefix(file_size=_SZ, station_table=stab).to_bytes()
     check("prefix 512 B with stations", len(prefix) == 512)
 
-    recs = read_stations(prefix)
-    check("read_stations count", recs is not None and len(recs) == 3)
-    check("split index 1 → 55/25000", split_station(recs[0])[:2] == (55, 25000))
-    check("split index 3 → 55/25777", split_station(recs[2])[:2] == (55, 25777))
+    recs = mla_read_stations(prefix)
+    check("mla_read_stations count", recs is not None and len(recs) == 3)
+    check("split index 1 → 55/25000", mla_split_station(recs[0])[:2] == (55, 25000))
+    check("split index 3 → 55/25777", mla_split_station(recs[2])[:2] == (55, 25777))
 
     # No station table → None
     plain = MlaPrefix(file_size=_SZ).to_bytes()
-    check("no stations → None", read_stations(plain) is None)
+    check("no stations → None", mla_read_stations(plain) is None)
 
     # End-to-end: write with both tables, mount, translate index → number
     schema = _example_schema().table()
@@ -402,12 +402,12 @@ def test_station_table():
     with MlaPosixHAL(_TMP) as hal:
         m2 = MlaCore(hal); m2.mount()
         pfx = m2._prefix.to_bytes()
-        stations = read_stations(pfx)
+        stations = mla_read_stations(pfx)
         rec, _ = list(m2)[0]
-        region, number, _ = split_station(stations[rec.station - 1])
+        region, number, _ = mla_split_station(stations[rec.station - 1])
         check("log index → real station", (region, number) == (55, 25777))
         check("both tables coexist in prefix",
-              read_schema(pfx)[1] is not None and stations is not None)
+              mla_read_schema(pfx)[1] is not None and stations is not None)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -416,12 +416,12 @@ def test_station_table():
 
 def test_extended_prefix():
     section("Extended prefix — tables overflow 512 B, CRC moves")
-    sb = SchemaBuilder()
+    sb = MlaSchemaBuilder()
     sb.log("datetime")
     for i in range(60):                     # 60 × 14 B ≈ 840 B schema
         sb.data(f"s{i:02d}", unit="raw", width=1)
     schema = sb.table()
-    st = StationTable()
+    st = MlaStationTable()
     for i in range(40):
         st.station(region=10, number=1000 + i)
     stab = st.table()
@@ -446,17 +446,17 @@ def test_extended_prefix():
     with MlaPosixHAL(_TMP) as hal:
         m2 = MlaCore(hal); m2.mount()
         check("mount of extended-prefix file", m2._prefix.schema_table == schema)
-        _, df = read_schema(m2._prefix.to_bytes())
+        _, df = mla_read_schema(m2._prefix.to_bytes())
         rec = list(m2)[0]
-        check("decode wide record", len(decode_payload(df, rec[1])) == 60)
+        check("decode wide record", len(mla_decode_payload(df, rec[1])) == 60)
 
     # The 255-sector ceiling is enforced.
     try:
-        huge = SchemaBuilder()
+        huge = MlaSchemaBuilder()
         for i in range(255):
             huge.data(f"d{i:03d}", unit="raw", width=1)
         MlaPrefix(file_size=_SZ, schema_table=huge.table(),
-                  station_table=StationTable().station(1, 1).table())
+                  station_table=MlaStationTable().station(1, 1).table())
         # 255 × 14 ≈ 3.6 KB → 8 sectors, fine; force the ceiling explicitly:
         prefix_byte_len_check = MLA_MAX_PREFIX_SEC * 512 + 1
         from nic_mla import _prefix_byte_len

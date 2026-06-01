@@ -1,4 +1,4 @@
-"""Tests for MlaBackend — browsing records, decoding values, exports, repair."""
+"""Tests for VdeMlaBackend — browsing records, decoding values, exports, repair."""
 import os
 import sqlite3
 import struct
@@ -8,20 +8,20 @@ import unittest
 from tests import helpers
 from tests.helpers import make_temp_mla, make_temp_mla_schema, SAMPLE_MLA, FIXTURE
 
-from volkov_core.local import LocalBackend
-from volkov_core.mla import MlaBackend, rec_type_name
-from volkov_core.backend import Unsupported
+from volkov_core.local import VdeLocalBackend
+from volkov_core.mla import VdeMlaBackend, vde_rec_type_name
+from volkov_core.backend import VdeUnsupported
 
 
 class RecTypeNameTests(unittest.TestCase):
     def test_known_combinations(self):
-        self.assertEqual(rec_type_name(0x00), "measure/raw")
-        self.assertEqual(rec_type_name(0x01), "measure/delta")
-        self.assertEqual(rec_type_name(0x13), "event/text")
-        self.assertEqual(rec_type_name(0xF0), "checkpoint/raw")
+        self.assertEqual(vde_rec_type_name(0x00), "measure/raw")
+        self.assertEqual(vde_rec_type_name(0x01), "measure/delta")
+        self.assertEqual(vde_rec_type_name(0x13), "event/text")
+        self.assertEqual(vde_rec_type_name(0xF0), "checkpoint/raw")
 
     def test_unknown_falls_back_readable(self):
-        self.assertIsInstance(rec_type_name(0x5A), str)
+        self.assertIsInstance(vde_rec_type_name(0x5A), str)
 
 
 class MlaBackendFixtureTests(unittest.TestCase):
@@ -29,8 +29,8 @@ class MlaBackendFixtureTests(unittest.TestCase):
 
     def setUp(self):
         self.path = make_temp_mla()
-        self.parent = LocalBackend(os.path.dirname(self.path))
-        self.b = MlaBackend(self.path, parent=self.parent)
+        self.parent = VdeLocalBackend(os.path.dirname(self.path))
+        self.b = VdeMlaBackend(self.path, parent=self.parent)
 
     def tearDown(self):
         try:
@@ -58,10 +58,10 @@ class MlaBackendFixtureTests(unittest.TestCase):
         self.assertEqual(self.b.read(recs[2]), b'{"msg":"hello"}')
 
     def test_decode_value_float(self):
-        self.assertEqual(self.b.decode_value(self.records()[0]), "21.5000")
+        self.assertEqual(self.b.mla_decode_value(self.records()[0]), "21.5000")
 
     def test_decode_value_text(self):
-        self.assertEqual(self.b.decode_value(self.records()[2]), '{"msg":"hello"}')
+        self.assertEqual(self.b.mla_decode_value(self.records()[2]), '{"msg":"hello"}')
 
     def test_info_record_rows(self):
         rows = dict(self.b.info(self.records()[0]))
@@ -75,17 +75,17 @@ class MlaBackendFixtureTests(unittest.TestCase):
 
     # ── exports (schemaless → flat single-value column) ──────────────────────
     def test_to_csv_header_and_rowcount(self):
-        lines = self.b.to_csv().decode("utf-8").strip().split("\n")
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
         self.assertTrue(lines[0].startswith("idx,time,unix,sta_idx,region,number,type,length,value"))
         self.assertEqual(len(lines), len(FIXTURE) + 1)
 
     def test_csv_value_commas_are_sanitised(self):
-        text = self.b.to_csv().decode("utf-8")
+        text = self.b.vde_to_csv().decode("utf-8")
         for line in text.strip().split("\n")[1:]:
             self.assertEqual(line.count(","), 8)  # 9 columns → 8 separators
 
     def test_to_sqlite_is_queryable(self):
-        blob = self.b.to_sqlite()
+        blob = self.b.vde_to_sqlite()
         fd, tmp = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         try:
@@ -122,7 +122,7 @@ class MlaBackendFixtureTests(unittest.TestCase):
             lambda: self.b.rename(rec, "y"),
             lambda: self.b.put_file("x", b""),
         ):
-            with self.assertRaises(Unsupported):
+            with self.assertRaises(VdeUnsupported):
                 call()
 
 
@@ -131,7 +131,7 @@ class MlaSchemaTests(unittest.TestCase):
 
     def setUp(self):
         self.path = make_temp_mla_schema()
-        self.b = MlaBackend(self.path, parent=LocalBackend(os.path.dirname(self.path)))
+        self.b = VdeMlaBackend(self.path, parent=VdeLocalBackend(os.path.dirname(self.path)))
 
     def tearDown(self):
         try:
@@ -152,15 +152,15 @@ class MlaSchemaTests(unittest.TestCase):
                          "index 1  →  region 7, number 100")
 
     def test_decode_value_multifield(self):
-        v = self.b.decode_value(self.records()[0])             # raw (235, 600)
+        v = self.b.mla_decode_value(self.records()[0])             # raw (235, 600)
         self.assertIn("temp=23.5 degC", v)
         self.assertIn("humidity=60 pct", v)
 
     def test_decode_value_signed_negative(self):
-        self.assertIn("temp=-1.5 degC", self.b.decode_value(self.records()[1]))
+        self.assertIn("temp=-1.5 degC", self.b.mla_decode_value(self.records()[1]))
 
     def test_text_event_falls_through(self):
-        self.assertEqual(self.b.decode_value(self.records()[3]), "PING")
+        self.assertEqual(self.b.mla_decode_value(self.records()[3]), "PING")
 
     def test_info_shows_decoded_columns(self):
         rows = dict(self.b.info(self.records()[0]))
@@ -168,7 +168,7 @@ class MlaSchemaTests(unittest.TestCase):
         self.assertEqual(rows["humidity"], "60 pct")
 
     def test_csv_has_field_and_station_columns(self):
-        lines = self.b.to_csv().decode("utf-8").strip().split("\n")
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
         self.assertEqual(
             lines[0],
             "idx,time,unix,sta_idx,region,number,type,length,temp,humidity")
@@ -176,11 +176,11 @@ class MlaSchemaTests(unittest.TestCase):
         self.assertTrue(lines[-1].endswith(",,"))  # text event → blank data cells
 
     def test_csv_raw_keeps_integers(self):
-        lines = self.b.to_csv(raw=True).decode("utf-8").strip().split("\n")
+        lines = self.b.vde_to_csv(raw=True).decode("utf-8").strip().split("\n")
         self.assertTrue(lines[1].endswith(",235,600"))
 
     def test_sqlite_has_field_columns_and_values(self):
-        blob = self.b.to_sqlite()
+        blob = self.b.vde_to_sqlite()
         fd, tmp = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         try:
@@ -208,8 +208,8 @@ class MlaEditTests(unittest.TestCase):
 
     def setUp(self):
         self.path = make_temp_mla_schema()
-        self.parent = LocalBackend(os.path.dirname(self.path))
-        self.b = MlaBackend(self.path, parent=self.parent)
+        self.parent = VdeLocalBackend(os.path.dirname(self.path))
+        self.b = VdeMlaBackend(self.path, parent=self.parent)
 
     def tearDown(self):
         try:
@@ -218,7 +218,7 @@ class MlaEditTests(unittest.TestCase):
             pass
 
     def reopen(self):
-        return MlaBackend(self.path, parent=self.parent)
+        return VdeMlaBackend(self.path, parent=self.parent)
 
     def first_record(self, b):
         return [e for e in b.list() if e.kind == "record"][0]
@@ -232,7 +232,7 @@ class MlaEditTests(unittest.TestCase):
         self.b.edit_schema_field(0, exp10=-2)            # 23.5 → 2.35
         b2 = self.reopen()
         self.assertEqual(b2.schema_view()[0]["exp10"], -2)
-        self.assertIn("temp=2.35", b2.decode_value(self.first_record(b2)))
+        self.assertIn("temp=2.35", b2.mla_decode_value(self.first_record(b2)))
         # the data records survive the prefix rewrite intact
         self.assertEqual(len([e for e in b2.list() if e.kind == "record"]), 4)
 
@@ -247,12 +247,12 @@ class MlaEditTests(unittest.TestCase):
         self.assertIn("9/999", self.first_record(b2).name)
 
     def test_invalid_edits_rejected(self):
-        from volkov_core.backend import BackendError
-        with self.assertRaises(BackendError):
+        from volkov_core.backend import VdeBackendError
+        with self.assertRaises(VdeBackendError):
             self.b.edit_schema_field(0, name="waytoolong")   # > 8 bytes
-        with self.assertRaises(BackendError):
+        with self.assertRaises(VdeBackendError):
             self.b.edit_schema_field(9, exp10=0)             # no such field
-        with self.assertRaises(BackendError):
+        with self.assertRaises(VdeBackendError):
             self.b.edit_schema_field(0, width=4)             # not an editable attr
 
 
@@ -261,7 +261,7 @@ class CommittedSampleTests(unittest.TestCase):
     """Smoke test against the real committed sample."""
 
     def setUp(self):
-        self.b = MlaBackend(SAMPLE_MLA, parent=LocalBackend(os.path.dirname(SAMPLE_MLA)))
+        self.b = VdeMlaBackend(SAMPLE_MLA, parent=VdeLocalBackend(os.path.dirname(SAMPLE_MLA)))
 
     def test_loads_records(self):
         recs = [e for e in self.b.list() if e.kind == "record"]
@@ -274,7 +274,7 @@ class CommittedSampleTests(unittest.TestCase):
 
     def test_csv_rowcount_matches_records(self):
         recs = [e for e in self.b.list() if e.kind == "record"]
-        lines = self.b.to_csv().decode("utf-8").strip().split("\n")
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
         self.assertEqual(len(lines), len(recs) + 1)
 
 

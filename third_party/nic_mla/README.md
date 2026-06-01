@@ -73,7 +73,7 @@ offset 0                                                              EOF
 | Path | Contents |
 |---|---|
 | `nic_mla.py` | Python reference core (format / mount / append / read / scan / recover) |
-| `nic_mla_archive.py` | Python: file rotation (`MlaArchive`) + host-side query (`query`) |
+| `nic_mla_archive.py` | Python: file rotation (`MlaArchive`) + host-side query (`mla_query`) |
 | `tools/mla_schema.py` | Build/read the SCHEMA + STATION tables; decode payloads for CSV/SQL |
 | `nic_mla_test.py` | Test suite (Python) |
 | `c/` | C libraries: write-only (MCU) + complete (ARM/PC) + HAL adapters |
@@ -101,23 +101,23 @@ with MlaPosixHAL("log.mla") as hal:
 Rotation across multiple files and filtering:
 
 ```python
-from nic_mla_archive import MlaArchive, query
+from nic_mla_archive import MlaArchive, mla_query
 with MlaArchive("/data") as arch:          # MLA00000.MLA, MLA00001.MLA, …
     arch.append(ts, station=1, data=payload)
-for rec, data in query(MlaArchive("/data"), station=1, time_from=t0, time_to=t1):
+for rec, data in mla_query(MlaArchive("/data"), station=1, time_from=t0, time_to=t1):
     ...
 ```
 
 Self-describing file (schema + station tables → ready for CSV/SQL export):
 
 ```python
-from mla_schema import SchemaBuilder, StationTable, read_schema, \
-                       read_stations, decode_payload, split_station
+from mla_schema import MlaSchemaBuilder, MlaStationTable, mla_read_schema, \
+                       mla_read_stations, mla_decode_payload, mla_split_station
 
-sb = SchemaBuilder()
+sb = MlaSchemaBuilder()
 sb.data("temp", unit="degC", width=2, exp10=-1, signed=True)
 sb.data("hum",  unit="pct",  width=2, exp10=-1)
-st = StationTable()
+st = MlaStationTable()
 st.station(region=55, number=25000)          # log index 1 → this station
 
 hal = MlaPosixHAL.create("log.mla")
@@ -130,10 +130,10 @@ with hal:
 with MlaPosixHAL("log.mla") as hal:
     mla = MlaCore(hal); mla.mount()
     pfx = mla._prefix.to_bytes()
-    _, fields = read_schema(pfx); stations = read_stations(pfx)
+    _, fields = mla_read_schema(pfx); stations = mla_read_stations(pfx)
     for rec, data in mla:
-        region, number, _ = split_station(stations[rec.station - 1])
-        cols = decode_payload(fields, data)   # [(name, unit, value), …]
+        region, number, _ = mla_split_station(stations[rec.station - 1])
+        cols = mla_decode_payload(fields, data)   # [(name, unit, value), …]
 ```
 
 Tests:

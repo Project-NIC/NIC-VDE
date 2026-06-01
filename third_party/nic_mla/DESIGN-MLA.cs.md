@@ -153,7 +153,7 @@ sektor**; když se tabulky nevejdou, roste po celých 512 B sektorech (max
 [33]  reserved        1 B   0
 [34]  SCHEMA tabulka  …     §3.1
 [..]  STATION tabulka …     §3.2
-[konec-2] crc16       2 B   LE  — přes vše před ním
+[konec-2] mla_crc16       2 B   LE  — přes vše před ním
 ```
 
 ### 3.1 SCHEMA tabulka — názvy/jednotky polí pro CSV/SQL
@@ -235,7 +235,7 @@ LOG záznam žije v LOG proudu (roste dolů od EOF). Má pevných **16 bajtů** 
 [11] kf_back    1 B  u8    záznamů zpět k vlastnímu keyframe (0 = tento JE keyframe)
 [12] station    1 B  u8    index 1..255 do tabulky stanic v prefixu (0 = žádná)
 [13] reserved   1 B  u8    0
-[14] crc16      2 B        CRC16 přes [0..13]
+[14] mla_crc16      2 B        CRC16 přes [0..13]
 ```
 
 Proč 16 B: je to mocnina dvojky, takže záznam nikdy nepřesahuje 512 B sektor a
@@ -250,7 +250,7 @@ Slot se interpretuje čistě z jeho bajtů:
 | Stav | Bajty | Pozná se |
 |---|---|---|
 | **Volný** | samé `0xFF` | čerstvé / smazané médium |
-| **Živý** | data + sedící CRC | `crc16(tělo) == uložené CRC` |
+| **Živý** | data + sedící CRC | `mla_crc16(tělo) == uložené CRC` |
 | **Zahozený** | samé `0x00` | CRC nesedí (vynulované tělo se **nehashuje** na `0x0000`) |
 
 Zahození záznamu = **přepiš 16 B nulami**. Jeho CRC pak nesedí, takže ho každá

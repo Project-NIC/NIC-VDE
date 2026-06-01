@@ -63,9 +63,9 @@ vzorek `samples/weather.mla`.
 ```
 volkov_data.py           GUI v prompt_toolkit (tenká slupka nad volkov_core)
 volkov_core/             logika bez GUI — použitelná samostatně
-  backend.py               abstrakce úložného backendu (Entry / Backend)
-  local.py                 LocalBackend — souborový systém hostitele
-  mla.py                   MlaBackend — tenký adaptér: záznamy jako „soubory“,
+  backend.py               abstrakce úložného backendu (VdeEntry / VdeBackend)
+  local.py                 VdeLocalBackend — souborový systém hostitele
+  mla.py                   VdeMlaBackend — tenký adaptér: záznamy jako „soubory“,
                            dekódování dle schématu + překlad stanice + export
   export.py                hloupá knihovna — generické řádky → CSV / SQLite
   stations.py              lepidlo — index stanice → reálný region/number

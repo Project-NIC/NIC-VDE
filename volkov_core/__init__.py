@@ -2,21 +2,21 @@
 
 __version__ = "1.0"
 
-from .backend import Backend, BackendError, Entry, Unsupported
-from .local import LocalBackend
-from .mla import MlaBackend, rec_type_name
+from .backend import VdeBackend, VdeBackendError, VdeEntry, VdeUnsupported
+from .local import VdeLocalBackend
+from .mla import VdeMlaBackend, vde_rec_type_name
 
 __all__ = [
-    "Backend", "BackendError", "Entry", "Unsupported",
-    "LocalBackend", "MlaBackend", "rec_type_name", "open_backend",
+    "VdeBackend", "VdeBackendError", "VdeEntry", "VdeUnsupported",
+    "VdeLocalBackend", "VdeMlaBackend", "vde_rec_type_name", "vde_open_backend",
 ]
 
 
-def open_backend(path: str) -> Backend:
-    """Open a path as a backend: a directory → LocalBackend, an .mla → MlaBackend."""
+def vde_open_backend(path: str) -> VdeBackend:
+    """Open a path as a backend: a directory → VdeLocalBackend, an .mla → VdeMlaBackend."""
     import os
     if os.path.isdir(path):
-        return LocalBackend(path)
+        return VdeLocalBackend(path)
     if path.lower().endswith(".mla"):
-        return MlaBackend(path, parent=LocalBackend(os.path.dirname(path) or "."))
-    raise BackendError(f"Don't know how to open: {path}")
+        return VdeMlaBackend(path, parent=VdeLocalBackend(os.path.dirname(path) or "."))
+    raise VdeBackendError(f"Don't know how to open: {path}")

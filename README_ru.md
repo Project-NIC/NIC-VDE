@@ -64,9 +64,9 @@ python3 -m unittest discover -s tests
 ```
 volkov_data.py           GUI на prompt_toolkit (тонкая оболочка над volkov_core)
 volkov_core/             логика без GUI — пригодна для самостоятельного использования
-  backend.py               абстракция бэкенда хранилища (Entry / Backend)
-  local.py                 LocalBackend — файловая система хоста
-  mla.py                   MlaBackend — тонкий адаптер: записи как «файлы»,
+  backend.py               абстракция бэкенда хранилища (VdeEntry / VdeBackend)
+  local.py                 VdeLocalBackend — файловая система хоста
+  mla.py                   VdeMlaBackend — тонкий адаптер: записи как «файлы»,
                            декодирование по схеме + разбор станции + экспорт
   export.py                глупая библиотека — обобщённые строки → CSV / SQLite
   stations.py              клей — индекс станции → реальные регион/номер

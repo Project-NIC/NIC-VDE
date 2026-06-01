@@ -9,7 +9,7 @@ Contains:
                 a simpler and crash-safe alternative to "full" (each file is
                 independently mountable; self-describing via prefix.file_seq).
 
-  query(...)   — host-side helper for flat record filtering (time / station /
+  mla_query(...)   — host-side helper for flat record filtering (time / station /
                  region / type). Runs only on a PC/RPi, where the log is swept
                  in RAM — the chip stays lean (write-only).
 
@@ -27,7 +27,7 @@ from typing import Iterator, Iterable
 
 from nic_mla import (
     MlaCore, MlaPosixHAL, MlaLog,
-    MLA_DEFAULT_SIZE, CRC_FULL, ENC_RAW,
+    MLA_DEFAULT_SIZE, MLA_CRC_FULL, MLA_ENC_RAW,
 )
 
 # Station index helper: the log carries a 1-byte station index into the prefix
@@ -58,7 +58,7 @@ class MlaArchive:
                  file_size:     int = MLA_DEFAULT_SIZE,
                  base:          str = "MLA",
                  digits:        int = 5,
-                 crc_mode:      int = CRC_FULL,
+                 crc_mode:      int = MLA_CRC_FULL,
                  cluster_shift: int = 12,
                  keyframe_intv: int = 8,
                  schema_table:  bytes = b"",
@@ -132,7 +132,7 @@ class MlaArchive:
         self._create_and_format(self._seq)
 
     def append(self, timestamp: int, station: int, data: bytes,
-               rec_type: int = ENC_RAW, kf_back: int = 0) -> None:
+               rec_type: int = MLA_ENC_RAW, kf_back: int = 0) -> None:
         """Append a record; rotate to the next file when the current one fills up.
 
         station — 1-byte index into the prefix station table (see MlaCore.append).
@@ -183,10 +183,10 @@ class MlaArchive:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  query — host-side helper for flat filtering
+#  mla_query — host-side helper for flat filtering
 # ──────────────────────────────────────────────────────────────────────────────
 
-def query(source: Iterable[tuple[MlaLog, bytes]], *,
+def mla_query(source: Iterable[tuple[MlaLog, bytes]], *,
           time_from: int | None = None,
           time_to:   int | None = None,
           station:   int | None = None,
@@ -238,11 +238,11 @@ if __name__ == "__main__":
         print(f"  Total records:   {arch_ro.total_records}")
 
         print("\n── Query: station index 2 only ──")
-        n = sum(1 for _ in query(arch_ro, station=2))
+        n = sum(1 for _ in mla_query(arch_ro, station=2))
         print(f"  Records on station 2: {n}")
 
         print("\n── Query: time window 1_600_000_010 .. 1_600_000_020 ──")
-        rows = list(query(arch_ro, time_from=1_600_000_010, time_to=1_600_000_020))
+        rows = list(mla_query(arch_ro, time_from=1_600_000_010, time_to=1_600_000_020))
         print(f"  Records in window: {len(rows)}  "
               f"(ts {rows[0][0].timestamp}..{rows[-1][0].timestamp})")
     finally:
