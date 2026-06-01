@@ -23,15 +23,15 @@ for _p in (_MLA_DIR, os.path.join(_MLA_DIR, "tools")):
 
 from nic_mla import (  # noqa: E402
     MlaCore, MlaPosixHAL,
-    ENC_RAW, ENC_TEXT, CLASS_MEASURE, CLASS_EVENT,
+    MLA_ENC_RAW, MLA_ENC_TEXT, MLA_CLASS_MEASURE, MLA_CLASS_EVENT,
 )
-from mla_schema import SchemaBuilder, StationTable  # noqa: E402
+from mla_schema import MlaSchemaBuilder, MlaStationTable  # noqa: E402
 
 REPO_ROOT = _ROOT
 SAMPLE_MLA = os.path.join(_ROOT, "samples", "weather.mla")
 
-RT_MEASURE = CLASS_MEASURE | ENC_RAW
-RT_TEXT = CLASS_EVENT | ENC_TEXT
+RT_MEASURE = MLA_CLASS_MEASURE | MLA_ENC_RAW
+RT_TEXT = MLA_CLASS_EVENT | MLA_ENC_TEXT
 
 # A known schemaless fixture: (station_index, rec_type, payload). Two float
 # measurements and one text event — exercises the length-guess fallback path.
@@ -69,11 +69,11 @@ def make_temp_mla_schema(t0=1_748_000_000, step=900) -> str:
     Decoded: row0 temp=23.5/humidity=60.0, row1 temp=-1.5/hum=61.2,
     row2 temp=0.0/humidity=99.9. Station index 1 → region 7, number 100.
     """
-    sb = SchemaBuilder()
+    sb = MlaSchemaBuilder()
     sb.log("datetime")
     for name, unit, width, exp10, signed in SCHEMA_SENSORS:
         sb.data(name, unit=unit, width=width, exp10=exp10, signed=signed)
-    st = StationTable()
+    st = MlaStationTable()
     st.station(region=SCHEMA_STATION[0], number=SCHEMA_STATION[1])
 
     rows = [(235, 600), (-15, 612), (0, 999)]  # raw int16 pairs (temp, humidity)

@@ -62,9 +62,9 @@ committed `samples/weather.mla`.
 ```
 volkov_data.py           prompt_toolkit GUI (thin shell over volkov_core)
 volkov_core/             GUI-free logic — reusable headless
-  backend.py               storage-backend abstraction (Entry / Backend)
-  local.py                 LocalBackend — host filesystem
-  mla.py                   MlaBackend — thin adapter: records as "files",
+  backend.py               storage-backend abstraction (VdeEntry / VdeBackend)
+  local.py                 VdeLocalBackend — host filesystem
+  mla.py                   VdeMlaBackend — thin adapter: records as "files",
                            schema decode + station resolve + export
   export.py                dumb library — generic rows → CSV / SQLite bytes
   stations.py              glue — station index → real region/number

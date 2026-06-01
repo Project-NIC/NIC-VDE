@@ -43,7 +43,7 @@ from prompt_toolkit.layout.controls import UIContent, UIControl
 from prompt_toolkit.styles import Style
 
 import volkov_core as vc
-from volkov_i18n import LANGUAGES, Translator
+from volkov_i18n import VDE_LANGUAGES, VdeTranslator
 
 # Box-drawing (double frame + single divider tee)
 TL, TR, BL, BR, H, V = "╔", "╗", "╚", "╝", "═", "║"
@@ -71,9 +71,9 @@ class Panel:
         "size": lambda e: e.size,
     }
 
-    def __init__(self, backend: vc.Backend):
+    def __init__(self, backend: vc.VdeBackend):
         self.backend = backend
-        self.entries: list[vc.Entry] = []
+        self.entries: list[vc.VdeEntry] = []
         self.selected = 0
         self.scroll = 0
         self.error = ""
@@ -85,8 +85,8 @@ class Panel:
         try:
             self.entries = self._sorted(self.backend.list())
             self.error = ""
-        except vc.BackendError as exc:
-            self.entries = [vc.Entry("..", True, kind="updir")]
+        except vc.VdeBackendError as exc:
+            self.entries = [vc.VdeEntry("..", True, kind="updir")]
             self.error = str(exc)
         self.selected = max(0, min(self.selected, len(self.entries) - 1))
         self.scroll = 0
@@ -98,7 +98,7 @@ class Panel:
         natural log order (seq = "unsorted") mean anything, so name/ext/size
         are hidden there.
         """
-        if isinstance(self.backend, vc.MlaBackend):
+        if isinstance(self.backend, vc.VdeMlaBackend):
             return [("time", "Time"), ("unsorted", "Sequence")]
         return [("name", "Name"), ("ext", "Extension"),
                 ("time", "Time"), ("size", "Size"), ("unsorted", "Unsorted")]
@@ -114,7 +114,7 @@ class Panel:
                     self.selected = i
                     break
 
-    def _sorted(self, entries: list[vc.Entry]) -> list[vc.Entry]:
+    def _sorted(self, entries: list[vc.VdeEntry]) -> list[vc.VdeEntry]:
         """Order entries per the panel's sort mode, '..' first, dirs before files."""
         updir = [e for e in entries if e.name == ".."]
         rest = [e for e in entries if e.name != ".."]
@@ -129,7 +129,7 @@ class Panel:
         return updir + rest
 
     @property
-    def current(self) -> vc.Entry | None:
+    def current(self) -> vc.VdeEntry | None:
         if 0 <= self.selected < len(self.entries):
             return self.entries[self.selected]
         return None
@@ -144,7 +144,7 @@ class Panel:
             return
         try:
             nxt = self.backend.enter(cur)
-        except vc.BackendError as exc:
+        except vc.VdeBackendError as exc:
             self.error = str(exc)
             return
         if nxt is None:
@@ -175,7 +175,7 @@ class VCControl(UIControl):
 
 class VolkovData:
     def __init__(self, left: str, right: str):
-        self.panels = [Panel(vc.LocalBackend(left)), Panel(vc.LocalBackend(right))]
+        self.panels = [Panel(vc.VdeLocalBackend(left)), Panel(vc.VdeLocalBackend(right))]
         self.active = 0
         # overlay state: None | ("info", rows) | ("view", title, lines, scroll)
         #                | ("input", title, prompt, buffer, action)
@@ -189,7 +189,7 @@ class VolkovData:
         self.submenu = None
         # export values as raw on-wire integers (False = decoded physical values)
         self.export_raw = False
-        self.i18n = Translator("en")
+        self.i18n = VdeTranslator("en")
         self.app = self._build_app()
 
     def tr(self, text: str) -> str:
@@ -247,7 +247,7 @@ class VolkovData:
         return [
             (T("Language"), [
                 (lang_tick(code) + name, (lambda c=code: self._set_lang(c)))
-                for code, name in LANGUAGES
+                for code, name in VDE_LANGUAGES
             ]),
             (("• " if self.export_raw else "  ") + T("Export raw values"),
              self._toggle_export_raw),
@@ -454,7 +454,7 @@ class VolkovData:
     def _fkeybar(self, width: int) -> Fragments:
         # F6 is dual-purpose: CSV export inside an .mla, rename/move on the disk.
         # Show the label that actually applies to the active panel.
-        f6 = "CSV" if isinstance(self.panel.backend, vc.MlaBackend) else "RenMov"
+        f6 = "CSV" if isinstance(self.panel.backend, vc.VdeMlaBackend) else "RenMov"
         labels = [("1", "Info"), ("2", "Repair"), ("3", "View"), ("4", "Values"),
                   ("5", "Copy"), ("6", f6), ("7", "Mkdir"), ("8", "Delete"),
                   ("9", "Menu"), ("10", "Quit")]
@@ -652,7 +652,7 @@ class VolkovData:
             return
         try:
             data = self.panel.backend.read(cur)
-        except vc.BackendError as exc:
+        except vc.VdeBackendError as exc:
             self.overlay = ("message", "Error", str(exc))
             return
         lines: list[str] = []
@@ -660,11 +660,11 @@ class VolkovData:
             try:
                 for k, v in self.panel.backend.info(cur):
                     lines.append(f"{k}: {v}")
-            except vc.BackendError:
+            except vc.VdeBackendError:
                 pass
             if with_values:  # F4: decoded value(s) via the schema
                 try:
-                    lines.append(f"Value: {self.panel.backend.decode_value(cur)}")
+                    lines.append(f"Value: {self.panel.backend.mla_decode_value(cur)}")
                 except Exception:
                     pass
             lines.append("─" * 40)
@@ -696,7 +696,7 @@ class VolkovData:
             return
         try:
             rows = self.panel.backend.info(cur)
-        except vc.BackendError as exc:
+        except vc.VdeBackendError as exc:
             self.overlay = ("message", "Error", str(exc))
             return
         self.overlay = ("info", "Info", rows)
@@ -709,16 +709,16 @@ class VolkovData:
         On anything that isn't an MLA there is nothing to repair → show info.
         """
         be = self.panel.backend
-        if isinstance(be, vc.MlaBackend):
+        if isinstance(be, vc.VdeMlaBackend):
             self.overlay = ("info", "Repair / check", be.repair_info())
             return
         cur = self.panel.current
         if cur is not None and cur.kind == "mla":
             try:
-                probe = be.enter(cur)  # opens the .mla as a fresh MlaBackend
+                probe = be.enter(cur)  # opens the .mla as a fresh VdeMlaBackend
                 rows = probe.repair_info()
                 probe.close()
-            except (vc.BackendError, AttributeError) as exc:
+            except (vc.VdeBackendError, AttributeError) as exc:
                 self.overlay = ("message", "Error", str(exc))
                 return
             self.overlay = ("info", "Repair / check", rows)
@@ -728,7 +728,7 @@ class VolkovData:
     def _do_f6(self) -> None:
         """F6: inside MLA → export whole container to CSV; else → rename."""
         be = self.panel.backend
-        if isinstance(be, vc.MlaBackend):
+        if isinstance(be, vc.VdeMlaBackend):
             name = be.csv_name()
             exists = self.other.backend.exists(name)
             msg = (f"Export all records to CSV\n  to  {self.other.backend.location}"
@@ -743,7 +743,7 @@ class VolkovData:
     def _do_sql(self) -> None:
         """Export the open MLA container to a SQLite .db in the other panel."""
         be = self.panel.backend
-        if not isinstance(be, vc.MlaBackend):
+        if not isinstance(be, vc.VdeMlaBackend):
             self.overlay = ("message", "Export SQL", "Open an .mla container first.")
             return
         name = be.sqlite_name()
@@ -763,7 +763,7 @@ class VolkovData:
             return
         # VC "RenMov": default destination is the other panel, so a bare Enter
         # MOVES the file there; edit it down to just a name to rename in place.
-        if isinstance(self.other.backend, vc.LocalBackend):
+        if isinstance(self.other.backend, vc.VdeLocalBackend):
             dest = os.path.join(self.other.backend.location, cur.name)
         else:
             dest = cur.name
@@ -774,7 +774,7 @@ class VolkovData:
         """F4: editor on the '..' row of an editable .mla, else the value view."""
         be = self.panel.backend
         cur = self.panel.current
-        if (isinstance(be, vc.MlaBackend) and (cur is None or cur.name == "..")
+        if (isinstance(be, vc.VdeMlaBackend) and (cur is None or cur.name == "..")
                 and be.editable):
             self._open_editor()
         else:
@@ -782,7 +782,7 @@ class VolkovData:
 
     def _open_editor(self) -> None:
         be = self.panel.backend
-        if not isinstance(be, vc.MlaBackend) or not be.editable:
+        if not isinstance(be, vc.VdeMlaBackend) or not be.editable:
             self.overlay = ("message", "Edit",
                             "Step inside an .mla that carries a schema or "
                             "station table first.")
@@ -822,7 +822,7 @@ class VolkovData:
                 sv = be.station_view()[row["si"]]
                 kw = {"region": sv["region"], "number": sv["number"], row["attr"]: val}
                 be.edit_station(row["si"], **kw)
-        except (vc.BackendError, ValueError) as exc:
+        except (vc.VdeBackendError, ValueError) as exc:
             self.overlay = ("message", "Error", str(exc))
             return
         rows = self._editor_rows()  # back to the editor, fresh values, cursor kept
@@ -848,14 +848,14 @@ class VolkovData:
             be.rename(cur, dest)            # no path → plain rename
             self.panel.reload()
             return
-        if not isinstance(be, vc.LocalBackend):
-            raise vc.BackendError("Move is only supported on the filesystem.")
+        if not isinstance(be, vc.VdeLocalBackend):
+            raise vc.VdeBackendError("Move is only supported on the filesystem.")
         src = os.path.join(be.location, cur.name)
         dst = os.path.join(dest, cur.name) if os.path.isdir(dest) else dest
         try:
             shutil.move(src, dst)
         except OSError as exc:
-            raise vc.BackendError(f"move failed: {exc}") from exc
+            raise vc.VdeBackendError(f"move failed: {exc}") from exc
         self.panel.reload()
         self.other.reload()
 
@@ -891,7 +891,7 @@ class VolkovData:
             data = self.panel.backend.read(cur)
             self.other.backend.put_file(dest_name, data)
             self.other.reload()
-        except vc.BackendError as exc:
+        except vc.VdeBackendError as exc:
             self.overlay = ("message", "Error", str(exc))
             return
         self.overlay = None  # silent success — panel just refreshes
@@ -911,7 +911,7 @@ class VolkovData:
                 self.panel.reload()
             elif action == "renmov":
                 self._renmov(buf)
-        except vc.BackendError as exc:
+        except vc.VdeBackendError as exc:
             self.overlay = ("message", "Error", str(exc))
 
     def _commit_confirm(self) -> None:
@@ -925,14 +925,14 @@ class VolkovData:
                 self._copy_now()
             elif action == "csv":
                 be = self.panel.backend
-                self.other.backend.put_file(be.csv_name(), be.to_csv(raw=self.export_raw))
+                self.other.backend.put_file(be.csv_name(), be.vde_to_csv(raw=self.export_raw))
                 self.other.reload()
             elif action == "sql":
                 be = self.panel.backend
                 self.other.backend.put_file(be.sqlite_name(),
-                                            be.to_sqlite(raw=self.export_raw))
+                                            be.vde_to_sqlite(raw=self.export_raw))
                 self.other.reload()
-        except vc.BackendError as exc:
+        except vc.VdeBackendError as exc:
             self.overlay = ("message", "Error", str(exc))
 
     # ── app wiring ─────────────────────────────────────────────────────────

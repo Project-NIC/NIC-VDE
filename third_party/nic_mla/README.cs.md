@@ -64,7 +64,7 @@ offset 0                                                        EOF
 | Cesta | Obsah |
 |---|---|
 | `nic_mla.py` | Python referenční jádro (format / mount / append / read / recover) |
-| `nic_mla_archive.py` | Python: rotace souborů (`MlaArchive`) + hostový dotaz (`query`) |
+| `nic_mla_archive.py` | Python: rotace souborů (`MlaArchive`) + hostový dotaz (`mla_query`) |
 | `tools/mla_schema.py` | Stavba/čtení tabulek SCHEMA + STATION; dekód payloadu pro CSV/SQL |
 | `nic_mla_test.py` | Testovací sada (Python) |
 | `c/` | C knihovny: write-only (MCU) + kompletní (ARM/PC) + HAL adaptéry |
@@ -92,22 +92,22 @@ with MlaPosixHAL("log.mla") as hal:
 Rotace přes víc souborů a filtrování:
 
 ```python
-from nic_mla_archive import MlaArchive, query
+from nic_mla_archive import MlaArchive, mla_query
 with MlaArchive("/data") as arch:          # MLA00000.MLA, MLA00001.MLA, …
     arch.append(ts, station=1, data=payload)
-for rec, data in query(MlaArchive("/data"), station=1, time_from=t0, time_to=t1):
+for rec, data in mla_query(MlaArchive("/data"), station=1, time_from=t0, time_to=t1):
     ...
 ```
 
 Sebepopisný soubor (tabulky schema + stanice → export do CSV/SQL):
 
 ```python
-from mla_schema import SchemaBuilder, StationTable, read_schema, \
-                       read_stations, decode_payload, split_station
+from mla_schema import MlaSchemaBuilder, MlaStationTable, mla_read_schema, \
+                       mla_read_stations, mla_decode_payload, mla_split_station
 
-sb = SchemaBuilder()
+sb = MlaSchemaBuilder()
 sb.data("temp", unit="degC", width=2, exp10=-1, signed=True)
-st = StationTable(); st.station(region=55, number=25000)   # index 1 → tato stanice
+st = MlaStationTable(); st.station(region=55, number=25000)   # index 1 → tato stanice
 
 hal = MlaPosixHAL.create("log.mla")
 with hal:
@@ -119,10 +119,10 @@ with hal:
 with MlaPosixHAL("log.mla") as hal:
     mla = MlaCore(hal); mla.mount()
     pfx = mla._prefix.to_bytes()
-    _, fields = read_schema(pfx); stations = read_stations(pfx)
+    _, fields = mla_read_schema(pfx); stations = mla_read_stations(pfx)
     for rec, data in mla:
-        region, number, _ = split_station(stations[rec.station - 1])
-        cols = decode_payload(fields, data)   # [(název, jednotka, hodnota), …]
+        region, number, _ = mla_split_station(stations[rec.station - 1])
+        cols = mla_decode_payload(fields, data)   # [(název, jednotka, hodnota), …]
 ```
 
 Testy:

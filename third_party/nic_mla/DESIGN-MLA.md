@@ -146,7 +146,7 @@ is **one 512 B sector**; if the tables don't fit it grows in whole 512 B sectors
 [33]  reserved        1 B   0
 [34]  SCHEMA table    …     §3.1
 [..]  STATION table   …     §3.2
-[end-2] crc16         2 B   LE  — over everything before it
+[end-2] mla_crc16         2 B   LE  — over everything before it
 ```
 
 ### 3.1 SCHEMA table — field names/units for CSV/SQL
@@ -249,7 +249,7 @@ The log record lives in the LOG stream (growing down from EOF). It is a fixed
 [11] kf_back     1 B  uint8      records back to the owning keyframe (0 = is one)
 [12] station     1 B  uint8      index 1..255 into the prefix station table (0 = none)
 [13] reserved    1 B  uint8      0
-[14] crc16       2 B  LE  — CRC16 over [0..13]
+[14] mla_crc16       2 B  LE  — CRC16 over [0..13]
 ```
 
 Why 16 B: it is a power of two, so a record never straddles a 512 B sector and
@@ -264,7 +264,7 @@ A slot is interpreted purely from its bytes:
 | State | Bytes | Detected by |
 |---|---|---|
 | **Free** | all `0xFF` | fresh / erased medium |
-| **Live** | data + matching CRC | `crc16(body) == stored CRC` |
+| **Live** | data + matching CRC | `mla_crc16(body) == stored CRC` |
 | **Abandoned** | all `0x00` | CRC fails (a zeroed body does **not** hash to `0x0000`) |
 
 Abandoning a record = **overwrite the 16 B with zeros**. Its CRC then no longer
@@ -292,12 +292,12 @@ Data payload written to the DATA stream:
 ```
 [0]       magic       2 B  0xAB 0xCD  (sync word)
 [2]       <payload>   N B  app data (1 to 65535 B)
-[2+N]     crc16       2 B  LE  — CRC16 over the payload (0xFFFF if CRC mode = NONE)
+[2+N]     mla_crc16       2 B  LE  — CRC16 over the payload (0xFFFF if CRC mode = NONE)
 ```
 
 **Why no type byte?** Type is in the log record (`rec_type`). This keeps the
 data stream **purely app-driven**. With a schema in the prefix, the payload is
-the sensor columns packed back-to-back (§3.1); `decode_payload()` splits and
+the sensor columns packed back-to-back (§3.1); `mla_decode_payload()` splits and
 scales them into `(name, unit, value)` for CSV/SQL.
 
 ---

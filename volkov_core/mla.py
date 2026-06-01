@@ -1,5 +1,5 @@
 """
-MlaBackend — browse the records inside an NIC-MLA container as if they were files.
+VdeMlaBackend — browse the records inside an NIC-MLA container as if they were files.
 
 Pressing Enter on an .mla file "steps inside" it: each logged record shows up as
 a panel item. This backend is a **thin adapter** over the dumb libraries — it
@@ -22,8 +22,8 @@ from dataclasses import replace
 from datetime import datetime
 
 from . import export
-from .backend import Backend, BackendError, Entry, Unsupported
-from .stations import StationMap
+from .backend import VdeBackend, VdeBackendError, VdeEntry, VdeUnsupported
+from .stations import VdeStationMap
 
 # Make the vendored MLA reference (and its host-only schema tool) importable.
 _MLA_DIR = os.path.abspath(
@@ -35,11 +35,11 @@ for _p in (_MLA_DIR, os.path.join(_MLA_DIR, "tools")):
 try:
     from nic_mla import MlaCore, MlaPosixHAL, MlaLog, MlaPrefix  # noqa: E402
     from mla_schema import (  # noqa: E402
-        read_schema, decode_value as _decode_field,
-        read_stations, split_station, SchemaBuilder, StationTable,
+        mla_read_schema, mla_decode_value as _decode_field,
+        mla_read_stations, mla_split_station, MlaSchemaBuilder, MlaStationTable,
     )
 except Exception as exc:  # pragma: no cover - only if vendoring is broken
-    raise BackendError(f"NIC-MLA library not available: {exc}") from exc
+    raise VdeBackendError(f"NIC-MLA library not available: {exc}") from exc
 
 # rec_type decoding (high nibble = class, low nibble = encoding)
 _ENC = {0x0: "raw", 0x1: "delta", 0x2: "keyframe", 0x3: "text"}
@@ -49,7 +49,7 @@ _CLS = {0x00: "measure", 0x10: "event", 0x20: "config", 0xF0: "checkpoint"}
 _BARE_UNITS = {"raw", "id", "count"}
 
 
-def rec_type_name(rt: int) -> str:
+def vde_rec_type_name(rt: int) -> str:
     cls = _CLS.get(rt & 0xF0, f"cls{rt >> 4:X}")
     enc = _ENC.get(rt & 0x0F, f"enc{rt & 0xF:X}")
     return f"{cls}/{enc}"
@@ -68,14 +68,14 @@ def _fmt_num(v) -> str:
     return str(v)
 
 
-class MlaBackend(Backend):
+class VdeMlaBackend(VdeBackend):
     """Read-only-ish view of an .mla container's records."""
 
-    def __init__(self, path: str, parent: Backend):
+    def __init__(self, path: str, parent: VdeBackend):
         self.path = os.path.abspath(path)
         self._parent = parent
         self._records: list[tuple] = []   # [(MlaLog, bytes)]
-        self._stations = StationMap(None)  # index → (region, number) glue
+        self._stations = VdeStationMap(None)  # index → (region, number) glue
         self._log_fields = None            # schema LOG-header fields (or None)
         self._data_fields = None           # schema DATA-payload fields (or None)
         self._summary: dict = {}
@@ -91,18 +91,18 @@ class MlaBackend(Backend):
                 self._summary = self._summarize(self._records)
                 self._summary.update(self._scan_health(core))
         except Exception as exc:
-            raise BackendError(f"Cannot open MLA: {exc}") from exc
+            raise VdeBackendError(f"Cannot open MLA: {exc}") from exc
 
     def _read_tables(self, hal, core) -> None:
         """Pull the self-describing schema + station tables out of the prefix."""
         try:
             raw_prefix = hal.read(0, core._prefix.size)
-            self._log_fields, self._data_fields = read_schema(raw_prefix)
-            self._stations = StationMap.from_prefix(raw_prefix)
+            self._log_fields, self._data_fields = mla_read_schema(raw_prefix)
+            self._stations = VdeStationMap.from_prefix(raw_prefix)
         except Exception:
             # an unreadable / unsupported table must not block browsing
             self._log_fields = self._data_fields = None
-            self._stations = StationMap(None)
+            self._stations = VdeStationMap(None)
 
     @property
     def has_schema(self) -> bool:
@@ -154,36 +154,36 @@ class MlaBackend(Backend):
         return os.path.basename(self.path)
 
     # ── browsing ────────────────────────────────────────────────────────────
-    def list(self) -> list[Entry]:
-        out = [Entry("..", True, 0, None, "updir")]
+    def list(self) -> list[VdeEntry]:
+        out = [VdeEntry("..", True, 0, None, "updir")]
         for i, (rec, _data) in enumerate(self._records):
             when = datetime.fromtimestamp(rec.timestamp).strftime("%d.%m.%y %H:%M:%S")
             name = "%05d  %s  %-11s %s" % (
                 i, when, self._stations.label(rec.station),
-                rec_type_name(rec.rec_type),
+                vde_rec_type_name(rec.rec_type),
             )
             stamp = datetime.fromtimestamp(rec.timestamp).strftime("%Y%m%d_%H%M%S")
             export_name = "rec%05d_%s_st%d.bin" % (i, stamp, rec.station)
-            out.append(Entry(
+            out.append(VdeEntry(
                 name=name, is_container=False, size=rec.length,
                 mtime=rec.timestamp, kind="record",
                 meta={"idx": i, "export_name": export_name},
             ))
         return out
 
-    def enter(self, entry: Entry) -> "Backend | None":
+    def enter(self, entry: VdeEntry) -> "VdeBackend | None":
         if entry.name == "..":
             return self._parent  # back out to the directory holding the .mla
         return None  # records are leaves
 
     # ── reading ─────────────────────────────────────────────────────────────
-    def read(self, entry: Entry) -> bytes:
+    def read(self, entry: VdeEntry) -> bytes:
         idx = entry.meta.get("idx")
         if idx is None or not (0 <= idx < len(self._records)):
-            raise BackendError("No such record")
+            raise VdeBackendError("No such record")
         return self._records[idx][1]
 
-    def info(self, entry: Entry) -> list[tuple[str, str]]:
+    def info(self, entry: VdeEntry) -> list[tuple[str, str]]:
         if entry.name == "..":
             return self._container_info()
         idx = entry.meta.get("idx")
@@ -193,7 +193,7 @@ class MlaBackend(Backend):
             ("Record (index)", str(idx)),
             ("Time", f"{ts}  (unix {rec.timestamp})"),
             ("Station", self._station_detail(rec.station)),
-            ("Type", f"0x{rec.rec_type:02X}  {rec_type_name(rec.rec_type)}"),
+            ("Type", f"0x{rec.rec_type:02X}  {vde_rec_type_name(rec.rec_type)}"),
             ("Length", f"{rec.length} B"),
         ]
         if rec.kf_back:
@@ -253,7 +253,7 @@ class MlaBackend(Backend):
             return None
         return out
 
-    def decode_value(self, entry: Entry) -> str:
+    def mla_decode_value(self, entry: VdeEntry) -> str:
         """Best-effort human value of a record's payload.
 
         With a schema, a measurement payload decodes into all of its named sensor
@@ -291,7 +291,7 @@ class MlaBackend(Backend):
         rn = self._stations.resolve(rec.station)
         region, number = (rn if rn else (None, None))
         return [idx, ts, rec.timestamp, rec.station, region, number,
-                rec_type_name(rec.rec_type), rec.length]
+                vde_rec_type_name(rec.rec_type), rec.length]
 
     def _data_values(self, rec, data: bytes, raw: bool):
         """Per-field native values for a packed payload, or None if it doesn't fit."""
@@ -318,22 +318,22 @@ class MlaBackend(Backend):
                     vals = [_fmt_num(v) for v in vals]
                 yield base + list(vals)
             else:
-                val = self.decode_value(Entry("", meta={"idx": idx}))
+                val = self.mla_decode_value(VdeEntry("", meta={"idx": idx}))
                 yield base + [val]
 
-    def to_csv(self, raw: bool = False) -> bytes:
+    def vde_to_csv(self, raw: bool = False) -> bytes:
         if self._data_fields:
             headers = list(self._BASE_HEADERS) + [f.name for f in self._data_fields]
         else:
             headers = list(self._BASE_HEADERS) + ["value"]
-        return export.to_csv(headers, self._rows(raw, stringify=True))
+        return export.vde_to_csv(headers, self._rows(raw, stringify=True))
 
-    def to_sqlite(self, raw: bool = False) -> bytes:
+    def vde_to_sqlite(self, raw: bool = False) -> bytes:
         if self._data_fields:
             cols = list(self._BASE_SQL) + [(f.name, "NUMERIC") for f in self._data_fields]
         else:
             cols = list(self._BASE_SQL) + [("value", "TEXT")]
-        return export.to_sqlite(cols, self._rows(raw, stringify=False))
+        return export.vde_to_sqlite(cols, self._rows(raw, stringify=False))
 
     def csv_name(self) -> str:
         return os.path.splitext(os.path.basename(self.path))[0] + ".csv"
@@ -377,7 +377,7 @@ class MlaBackend(Backend):
         """Editable view of the station table (index 1..n → region/number)."""
         out = []
         for i, rec in enumerate(self._stations.records, start=1):
-            region, number, _res = split_station(rec)
+            region, number, _res = mla_split_station(rec)
             out.append({"index": i, "region": region, "number": number})
         return out
 
@@ -385,15 +385,15 @@ class MlaBackend(Backend):
         """Change one DATA field's content (name/unit/exp10/signed/offset)."""
         fields = list(self._data_fields or [])
         if not (0 <= i < len(fields)):
-            raise BackendError("No such schema field")
+            raise VdeBackendError("No such schema field")
         bad = set(changes) - {"name", "unit", "exp10", "signed", "offset"}
         if bad:
-            raise BackendError(f"Cannot edit: {', '.join(sorted(bad))}")
+            raise VdeBackendError(f"Cannot edit: {', '.join(sorted(bad))}")
         try:
             edited = replace(fields[i], **changes)
             edited.descriptor()  # validate ranges (width/unit/exp10/offset/name)
         except (ValueError, TypeError) as exc:
-            raise BackendError(f"Invalid value: {exc}") from exc
+            raise VdeBackendError(f"Invalid value: {exc}") from exc
         fields[i] = edited
         self._rewrite_tables(data_fields=fields)
 
@@ -401,10 +401,10 @@ class MlaBackend(Backend):
         """Change one station's region/number (0-based i); reserved preserved."""
         recs = self._stations.records
         if not (0 <= i < len(recs)):
-            raise BackendError("No such station")
-        _r, _n, reserved = split_station(recs[i])
+            raise VdeBackendError("No such station")
+        _r, _n, reserved = mla_split_station(recs[i])
         try:
-            st = StationTable()
+            st = MlaStationTable()
             for j, rec in enumerate(recs):
                 if j == i:
                     st.station(region=region, number=number, reserved=reserved)
@@ -412,7 +412,7 @@ class MlaBackend(Backend):
                     st.raw(rec)
             new_station = st.table()
         except (ValueError, TypeError) as exc:
-            raise BackendError(f"Invalid value: {exc}") from exc
+            raise VdeBackendError(f"Invalid value: {exc}") from exc
         self._rewrite_tables(station_table=new_station)
 
     def _rewrite_tables(self, data_fields=None, station_table=None) -> None:
@@ -427,7 +427,7 @@ class MlaBackend(Backend):
                 raw = hal.read(0, MlaPrefix.parse_size(hal.read(0, 512)))
                 pfx = MlaPrefix.from_bytes(raw)
                 if data_fields is not None:
-                    sb = SchemaBuilder()
+                    sb = MlaSchemaBuilder()
                     sb.log_fields = list(self._log_fields or [])
                     sb.data_fields = list(data_fields)
                     pfx.schema_table = sb.table()
@@ -435,13 +435,13 @@ class MlaBackend(Backend):
                     pfx.station_table = station_table
                 new = pfx.to_bytes()
                 if len(new) != len(raw):
-                    raise BackendError("edit would resize the prefix — refused")
+                    raise VdeBackendError("edit would resize the prefix — refused")
                 hal.write(0, new)
                 hal.sync()
-        except BackendError:
+        except VdeBackendError:
             raise
         except Exception as exc:
-            raise BackendError(f"Cannot write tables: {exc}") from exc
+            raise VdeBackendError(f"Cannot write tables: {exc}") from exc
         self._load()  # re-read everything from disk
 
     # ── mutating — intentionally limited inside MLA ───────────────────────────
@@ -450,13 +450,13 @@ class MlaBackend(Backend):
     _RO = "MLA is append-only by design — copy a record out (F5) to work on it."
 
     def mkdir(self, name: str) -> None:
-        raise Unsupported(self._RO)
+        raise VdeUnsupported(self._RO)
 
-    def delete(self, entry: Entry) -> None:
-        raise Unsupported(self._RO)
+    def delete(self, entry: VdeEntry) -> None:
+        raise VdeUnsupported(self._RO)
 
-    def rename(self, entry: Entry, new_name: str) -> None:
-        raise Unsupported(self._RO)
+    def rename(self, entry: VdeEntry, new_name: str) -> None:
+        raise VdeUnsupported(self._RO)
 
     def put_file(self, name: str, data: bytes) -> None:
-        raise Unsupported(self._RO)
+        raise VdeUnsupported(self._RO)

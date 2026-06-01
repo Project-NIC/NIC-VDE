@@ -1,4 +1,4 @@
-"""Tests for LocalBackend against a throwaway temp directory tree."""
+"""Tests for VdeLocalBackend against a throwaway temp directory tree."""
 import os
 import shutil
 import tempfile
@@ -7,9 +7,9 @@ import unittest
 from tests import helpers
 from tests.helpers import make_temp_mla
 
-from volkov_core.local import LocalBackend
-from volkov_core.mla import MlaBackend
-from volkov_core.backend import BackendError
+from volkov_core.local import VdeLocalBackend
+from volkov_core.mla import VdeMlaBackend
+from volkov_core.backend import VdeBackendError
 
 
 class LocalBackendTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class LocalBackendTests(unittest.TestCase):
         tmp_mla = make_temp_mla()
         self.mla_path = os.path.join(self.root, "data.mla")
         shutil.move(tmp_mla, self.mla_path)
-        self.b = LocalBackend(self.root)
+        self.b = VdeLocalBackend(self.root)
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
@@ -51,18 +51,18 @@ class LocalBackendTests(unittest.TestCase):
     def test_enter_subdir(self):
         sub = next(e for e in self.b.list() if e.name == "sub")
         child = self.b.enter(sub)
-        self.assertIsInstance(child, LocalBackend)
+        self.assertIsInstance(child, VdeLocalBackend)
         self.assertEqual(os.path.basename(child.location), "sub")
 
     def test_enter_updir(self):
         up = self.b.enter(self.b.list()[0])
-        self.assertIsInstance(up, LocalBackend)
+        self.assertIsInstance(up, VdeLocalBackend)
         self.assertEqual(up.location, os.path.dirname(self.root))
 
     def test_enter_mla_returns_mla_backend(self):
         mla = next(e for e in self.b.list() if e.name == "data.mla")
         child = self.b.enter(mla)
-        self.assertIsInstance(child, MlaBackend)
+        self.assertIsInstance(child, VdeMlaBackend)
 
     def test_enter_plain_file_is_none(self):
         f = next(e for e in self.b.list() if e.name == "b.txt")
@@ -75,7 +75,7 @@ class LocalBackendTests(unittest.TestCase):
 
     def test_read_directory_raises(self):
         sub = next(e for e in self.b.list() if e.name == "sub")
-        with self.assertRaises(BackendError):
+        with self.assertRaises(VdeBackendError):
             self.b.read(sub)
 
     # ── mutating ─────────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ class LocalBackendTests(unittest.TestCase):
         self.assertNotIn("sub", self.names())
 
     def test_mkdir_failure_raises_backend_error(self):
-        with self.assertRaises(BackendError):
+        with self.assertRaises(VdeBackendError):
             self.b.mkdir("sub")  # already exists
 
 

@@ -3,30 +3,30 @@ import unittest
 
 from tests import helpers  # noqa: F401  — path bootstrap
 
-from volkov_i18n import Translator, TABLES, LANGUAGES
+from volkov_i18n import VdeTranslator, TABLES, VDE_LANGUAGES
 
 
 class TranslatorTests(unittest.TestCase):
     def test_default_is_english_identity(self):
-        t = Translator()
+        t = VdeTranslator()
         self.assertEqual(t.lang, "en")
         self.assertEqual(t.tr("Files"), "Files")  # identity fallback
 
     def test_switch_language(self):
-        t = Translator()
+        t = VdeTranslator()
         t.set_lang("cs")
         self.assertEqual(t.tr("Files"), "Soubory")
 
     def test_unknown_string_falls_back_to_source(self):
-        t = Translator("cs")
+        t = VdeTranslator("cs")
         self.assertEqual(t.tr("No such key here"), "No such key here")
 
     def test_unknown_language_falls_back_to_english(self):
-        t = Translator("zz")
+        t = VdeTranslator("zz")
         self.assertEqual(t.lang, "en")
 
     def test_languages_all_have_tables(self):
-        for code, _native in LANGUAGES:
+        for code, _native in VDE_LANGUAGES:
             self.assertIn(code, TABLES)
 
     def test_translation_keys_consistent(self):
