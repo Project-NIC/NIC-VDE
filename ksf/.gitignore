@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# C / AVR build artifacts
+*.o
+*.elf
+test_ksf_32
+test_ksf_64
+nic_ksf_32.elf
+nic_ksf_64.elf
+
+# Demo output
+ksf_demo.bin

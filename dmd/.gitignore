@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.o
+*.a
+*.so
+*.so.bak
+*.s
+dmd_test
+nic_dmd_test
+nic_dmd_optimized_test
+real_data*/
+.idea/
+.vscode/

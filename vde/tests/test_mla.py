@@ -1,0 +1,357 @@
+"""Tests for VdeMlaBackend — browsing records, decoding values, exports, repair."""
+import os
+import sqlite3
+import struct
+import tempfile
+import unittest
+
+from tests import helpers
+from tests.helpers import (make_temp_mla, make_temp_mla_schema, make_temp_mla_compressed,
+                           COMPRESSED_ROWS, SAMPLE_MLA, FIXTURE)
+
+from volkov_core.local import VdeLocalBackend
+from volkov_core.mla import VdeMlaBackend, vde_record_kind_name
+from volkov_core.backend import VdeUnsupported
+
+
+class RecordKindNameTests(unittest.TestCase):
+    def test_derived_kinds(self):
+        self.assertEqual(vde_record_kind_name(False, 0), "raw")
+        self.assertEqual(vde_record_kind_name(True, 0), "keyframe")
+        self.assertEqual(vde_record_kind_name(True, 3), "delta")
+
+    def test_uncompressed_is_raw_regardless_of_kf_back(self):
+        self.assertEqual(vde_record_kind_name(False, 5), "raw")
+
+
+class MlaBackendFixtureTests(unittest.TestCase):
+    """Exact assertions against a known, schemaless fixture (fallback path)."""
+
+    def setUp(self):
+        self.path = make_temp_mla()
+        self.parent = VdeLocalBackend(os.path.dirname(self.path))
+        self.b = VdeMlaBackend(self.path, parent=self.parent)
+
+    def tearDown(self):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def records(self):
+        return [e for e in self.b.list() if e.kind == "record"]
+
+    def test_list_updir_plus_records(self):
+        items = self.b.list()
+        self.assertEqual(items[0].name, "..")
+        self.assertEqual(len(self.records()), len(FIXTURE))
+
+    def test_enter_updir_returns_parent(self):
+        self.assertIs(self.b.enter(self.b.list()[0]), self.parent)
+
+    def test_records_are_leaves(self):
+        self.assertIsNone(self.b.enter(self.records()[0]))
+
+    def test_read_returns_payload(self):
+        recs = self.records()
+        self.assertEqual(self.b.read(recs[0]), struct.pack("<f", 21.5))
+        self.assertEqual(self.b.read(recs[2]), b'{"msg":"hello"}')
+
+    def test_decode_value_float(self):
+        self.assertEqual(self.b.mla_decode_value(self.records()[0]), "21.5000")
+
+    def test_decode_value_nonnumeric_falls_through_to_hex(self):
+        # No schema and a non-4/2/1-byte payload → hex dump fallback.
+        self.assertEqual(self.b.mla_decode_value(self.records()[2]),
+                         b'{"msg":"hello"}'.hex(" "))
+
+    def test_info_record_rows(self):
+        rows = dict(self.b.info(self.records()[0]))
+        self.assertIn("Record (index)", rows)
+        self.assertIn("Station", rows)
+        self.assertEqual(rows["Length"], "4 B")
+
+    def test_info_container(self):
+        rows = dict(self.b.info(self.b.list()[0]))  # ".." → container info
+        self.assertEqual(rows["Records"], str(len(FIXTURE)))
+
+    # ── exports (schemaless → flat single-value column) ──────────────────────
+    def test_to_csv_header_and_rowcount(self):
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
+        self.assertTrue(lines[0].startswith("idx,time,unix,sta_idx,region,number,kind,length,subsec_hi,subsec_lo,value"))
+        self.assertEqual(len(lines), len(FIXTURE) + 1)
+
+    def test_csv_value_commas_are_sanitised(self):
+        text = self.b.vde_to_csv().decode("utf-8")
+        for line in text.strip().split("\n")[1:]:
+            self.assertEqual(line.count(","), 10)  # 11 columns → 10 separators
+
+    def test_to_sqlite_is_queryable(self):
+        blob = self.b.vde_to_sqlite()
+        fd, tmp = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(blob)
+            con = sqlite3.connect(tmp)
+            try:
+                n = con.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+                self.assertEqual(n, len(FIXTURE))
+                val = con.execute(
+                    "SELECT value FROM records ORDER BY idx LIMIT 1").fetchone()[0]
+                self.assertEqual(val, "21.5000")
+            finally:
+                con.close()
+        finally:
+            os.remove(tmp)
+
+    def test_export_names(self):
+        self.assertTrue(self.b.csv_name().endswith(".csv"))
+        self.assertTrue(self.b.sqlite_name().endswith(".db"))
+
+    # ── repair / health ──────────────────────────────────────────────────────
+    def test_repair_clean_file_verdict_ok(self):
+        rows = dict(self.b.repair_info())
+        self.assertEqual(rows["Valid records"], str(len(FIXTURE)))
+        self.assertIn("OK", rows["Verdict"])
+
+    # ── append-only enforcement ────────────────────────────────────────────────
+    def test_mutating_ops_unsupported(self):
+        rec = self.records()[0]
+        for call in (
+            lambda: self.b.mkdir("x"),
+            lambda: self.b.delete(rec),
+            lambda: self.b.rename(rec, "y"),
+            lambda: self.b.put_file("x", b""),
+        ):
+            with self.assertRaises(VdeUnsupported):
+                call()
+
+
+class MlaSchemaTests(unittest.TestCase):
+    """The self-describing path: a file whose prefix carries schema + station."""
+
+    def setUp(self):
+        self.path = make_temp_mla_schema()
+        self.b = VdeMlaBackend(self.path, parent=VdeLocalBackend(os.path.dirname(self.path)))
+
+    def tearDown(self):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def records(self):
+        return [e for e in self.b.list() if e.kind == "record"]
+
+    def test_schema_detected(self):
+        self.assertTrue(self.b.has_schema)
+        self.assertEqual([f.name for f in self.b._data_fields], ["temp", "humidity"])
+
+    def test_station_resolved_in_panel_and_info(self):
+        self.assertIn("7/100", self.records()[0].name)         # region/number label
+        self.assertEqual(dict(self.b.info(self.records()[0]))["Station"],
+                         "index 1  →  region 7, number 100")
+
+    def test_decode_value_multifield(self):
+        v = self.b.mla_decode_value(self.records()[0])             # raw (235, 600)
+        self.assertIn("temp=23.5 degC", v)
+        self.assertIn("humidity=60 pct", v)
+
+    def test_decode_value_signed_negative(self):
+        self.assertIn("temp=-1.5 degC", self.b.mla_decode_value(self.records()[1]))
+
+    def test_nonmatching_width_falls_through(self):
+        # b"PING!" doesn't match the 4-byte schema width → hex dump fallback.
+        self.assertEqual(self.b.mla_decode_value(self.records()[3]),
+                         b"PING!".hex(" "))
+
+    def test_info_shows_decoded_columns(self):
+        rows = dict(self.b.info(self.records()[0]))
+        self.assertEqual(rows["temp"], "23.5 degC")
+        self.assertEqual(rows["humidity"], "60 pct")
+
+    def test_csv_has_field_and_station_columns(self):
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
+        self.assertEqual(
+            lines[0],
+            "idx,time,unix,sta_idx,region,number,kind,length,subsec_hi,subsec_lo,temp,humidity")
+        self.assertTrue(lines[1].endswith(",1,7,100,raw,4,0,0,23.5,60"))
+        self.assertTrue(lines[-1].endswith(",,"))  # text event → blank data cells
+
+    def test_csv_raw_keeps_integers(self):
+        lines = self.b.vde_to_csv(raw=True).decode("utf-8").strip().split("\n")
+        self.assertTrue(lines[1].endswith(",235,600"))
+
+    def test_sqlite_has_field_columns_and_values(self):
+        blob = self.b.vde_to_sqlite()
+        fd, tmp = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with open(tmp, "wb") as f:
+                f.write(blob)
+            con = sqlite3.connect(tmp)
+            try:
+                cols = [r[1] for r in con.execute("PRAGMA table_info(records)")]
+                self.assertIn("temp", cols)
+                self.assertIn("region", cols)
+                temp = con.execute(
+                    "SELECT temp FROM records ORDER BY idx LIMIT 1").fetchone()[0]
+                self.assertEqual(temp, 23.5)
+                region = con.execute(
+                    "SELECT region FROM records ORDER BY idx LIMIT 1").fetchone()[0]
+                self.assertEqual(region, 7)
+            finally:
+                con.close()
+        finally:
+            os.remove(tmp)
+
+
+class MlaEditTests(unittest.TestCase):
+    """F4 editor: change schema/station table values in place (prefix CRC redone)."""
+
+    def setUp(self):
+        self.path = make_temp_mla_schema()
+        self.parent = VdeLocalBackend(os.path.dirname(self.path))
+        self.b = VdeMlaBackend(self.path, parent=self.parent)
+
+    def tearDown(self):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def reopen(self):
+        return VdeMlaBackend(self.path, parent=self.parent)
+
+    def first_record(self, b):
+        return [e for e in b.list() if e.kind == "record"][0]
+
+    def test_views(self):
+        self.assertEqual([f["name"] for f in self.b.schema_view()], ["temp", "humidity"])
+        self.assertEqual(self.b.station_view(),
+                         [{"index": 1, "region": 7, "number": 100}])
+
+    def test_edit_schema_scale_persists(self):
+        self.b.edit_schema_field(0, exp10=-2)            # 23.5 → 2.35
+        b2 = self.reopen()
+        self.assertEqual(b2.schema_view()[0]["exp10"], -2)
+        self.assertIn("temp=2.35", b2.mla_decode_value(self.first_record(b2)))
+        # the data records survive the prefix rewrite intact
+        self.assertEqual(len([e for e in b2.list() if e.kind == "record"]), 4)
+
+    def test_edit_schema_name_persists(self):
+        self.b.edit_schema_field(0, name="tempC")
+        self.assertEqual(self.reopen().schema_view()[0]["name"], "tempC")
+
+    def test_edit_station_persists(self):
+        self.b.edit_station(0, region=9, number=999)
+        b2 = self.reopen()
+        self.assertEqual(b2.station_view()[0], {"index": 1, "region": 9, "number": 999})
+        self.assertIn("9/999", self.first_record(b2).name)
+
+    def test_invalid_edits_rejected(self):
+        from volkov_core.backend import VdeBackendError
+        with self.assertRaises(VdeBackendError):
+            self.b.edit_schema_field(0, name="waytoolong")   # > 8 bytes
+        with self.assertRaises(VdeBackendError):
+            self.b.edit_schema_field(9, exp10=0)             # no such field
+        with self.assertRaises(VdeBackendError):
+            self.b.edit_schema_field(0, width=4)             # not an editable attr
+
+
+@unittest.skipUnless(os.path.exists(SAMPLE_MLA), "committed sample weather.mla absent")
+class CommittedSampleTests(unittest.TestCase):
+    """Smoke test against the real committed sample."""
+
+    def setUp(self):
+        self.b = VdeMlaBackend(SAMPLE_MLA, parent=VdeLocalBackend(os.path.dirname(SAMPLE_MLA)))
+
+    def test_loads_records(self):
+        recs = [e for e in self.b.list() if e.kind == "record"]
+        self.assertGreater(len(recs), 100)
+
+    def test_every_record_reads(self):
+        for e in self.b.list():
+            if e.kind == "record":
+                self.assertEqual(len(self.b.read(e)), e.size)
+
+    def test_csv_rowcount_matches_records(self):
+        recs = [e for e in self.b.list() if e.kind == "record"]
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
+        self.assertEqual(len(lines), len(recs) + 1)
+
+
+class MlaCompressedTests(unittest.TestCase):
+    """NIC-DMD-compressed records decompress and decode like raw ones (parity
+    with NIC-GLUE-OUT — every reader behaves the same)."""
+
+    def setUp(self):
+        self.path = make_temp_mla_compressed()
+        self.b = VdeMlaBackend(self.path, parent=VdeLocalBackend(os.path.dirname(self.path)))
+
+    def tearDown(self):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def records(self):
+        return [e for e in self.b.list() if e.kind == "record"]
+
+    def test_records_are_compressed_kinds(self):
+        kinds = [e.name.split()[-1] for e in self.records()]
+        self.assertEqual(kinds[0], "keyframe")               # first packet
+        self.assertTrue(all(k in ("keyframe", "delta") for k in kinds))
+
+    def test_compressed_values_decode(self):
+        recs = self.records()
+        self.assertEqual(len(recs), len(COMPRESSED_ROWS))
+        for e, (temp, hum) in zip(recs, COMPRESSED_ROWS):
+            v = self.b.mla_decode_value(e)                   # decompress → schema decode
+            self.assertIn(f"temp={temp / 10:g} degC", v)
+            self.assertIn(f"humidity={hum / 10:g} pct", v)
+
+    def test_csv_fills_compressed_rows(self):
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
+        self.assertEqual(len(lines), len(COMPRESSED_ROWS) + 1)   # header + rows
+        # first data row carries decoded temp/humidity, not blank cells
+        self.assertTrue(lines[1].rstrip().endswith("23.5,60"))
+
+
+class MlaSubsecExportTests(unittest.TestCase):
+    """subsec (two opaque bytes) reaches the CSV export — split into hi/lo by
+    default, or a single 16-bit column on request."""
+
+    def setUp(self):
+        sb = helpers.MlaSchemaBuilder(); sb.log("datetime")
+        sb.data("t", unit="pct", width=1)
+        st = helpers.MlaStationTable(); st.station(region=7, number=100)
+        fd, self.path = tempfile.mkstemp(suffix=".mla"); os.close(fd)
+        with helpers.MlaPosixHAL.create(self.path, file_size=16 * 1024) as hal:
+            core = helpers.MlaCore(hal)
+            core.format(file_size=16 * 1024, keyframe_intv=0,
+                        schema_table=sb.table(), station_table=st.table())
+            core.append(1000, 1, b"\x05", subsec=0x0203)     # hi = 2, lo = 3
+            core.sync()
+        self.b = VdeMlaBackend(self.path, VdeLocalBackend(os.path.dirname(self.path)))
+
+    def tearDown(self):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+    def test_split_two_columns_default(self):
+        lines = self.b.vde_to_csv().decode("utf-8").strip().split("\n")
+        self.assertEqual(lines[0].split(",")[8:10], ["subsec_hi", "subsec_lo"])
+        self.assertEqual(lines[1].split(",")[8:10], ["2", "3"])
+
+    def test_single_column_mode(self):
+        lines = self.b.vde_to_csv(subsec_split=False).decode("utf-8").strip().split("\n")
+        self.assertEqual(lines[0].split(",")[8], "subsec")
+        self.assertEqual(lines[1].split(",")[8], "515")        # 0x0203
+
+
+if __name__ == "__main__":
+    unittest.main()
