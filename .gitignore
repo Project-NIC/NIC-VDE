@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+*.mla
+*.MLA
+# keep the committed sample for GUI development
+!samples/weather.mla

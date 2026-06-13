@@ -1,0 +1,18 @@
+# Vendored-copy manifest for NIC-VDE.
+#
+#   <vendored path, relative to repo root>  <-  <REPO>/<path under $NIC_SRC_DIR>
+#
+# `python3 tools/sync_vendor.py`         rewrites the left side from the right.
+# `python3 tools/sync_vendor.py --check` fails if any pair has drifted (CI).
+#
+# Only the Python runtime VDE actually imports is vendored — no C tree, no docs,
+# no duplicate schema copy. Less to drift = fewer errors. VENDORED.md and the
+# vendored .gitignore are local and are NOT listed here.
+
+third_party/nic_mla/nic_mla.py            <- NIC-MLA/nic_mla.py
+third_party/nic_mla/nic_mla_archive.py    <- NIC-MLA/nic_mla_archive.py
+third_party/nic_mla/tools/mla_schema.py   <- NIC-MLA/tools/mla_schema.py
+third_party/nic_mla/tools/mla_datalogger.py   <- NIC-MLA/tools/mla_datalogger.py
+
+third_party/nic_dmd/nic_dmd.py            <- NIC-DMD/python/nic_dmd.py
+third_party/nic_dmd/LICENSE               <- NIC-DMD/LICENSE

@@ -1,0 +1,17 @@
+# Vendored-copy manifest for NIC-GLUE-IN.
+#
+#   <vendored path, relative to repo root>  <-  <REPO>/<path under $NIC_SRC_DIR>
+#
+# `python3 tools/sync_vendor.py`         rewrites the left side from the right.
+# `python3 tools/sync_vendor.py --check` fails if any pair has drifted (CI).
+#
+# VENDORED.md files under third_party/ are local notes and are intentionally
+# NOT listed here — they are not copied from upstream.
+
+third_party/nic_mla/nic_mla.py          <- NIC-MLA/nic_mla.py
+third_party/nic_mla/nic_mla_archive.py  <- NIC-MLA/nic_mla_archive.py
+third_party/nic_mla/mla_schema.py       <- NIC-MLA/tools/mla_schema.py
+third_party/nic_mla/mla_datalogger.py   <- NIC-MLA/tools/mla_datalogger.py
+
+third_party/nic_dmd/nic_dmd.py          <- NIC-DMD/python/nic_dmd.py
+third_party/nic_dmd/LICENSE             <- NIC-DMD/LICENSE
