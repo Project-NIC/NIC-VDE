@@ -1,8 +1,8 @@
 # NIC-GLUE-OUT — C build.  MLA / DMD sources referenced, never vendored.
 #   make NIC_MLA=/path NIC_DMD=/path   to retarget (central library later)
 #   make SQLITE=1   to compile the real .db path (needs -lsqlite3 or the amalgamation)
-NIC_MLA ?= ../../NIC-MLA
-NIC_DMD ?= ../../NIC-DMD
+NIC_MLA ?= ../../mla
+NIC_DMD ?= ../../dmd
 
 CC      ?= cc
 CFLAGS  ?= -std=c99 -Wall -Wextra -O2

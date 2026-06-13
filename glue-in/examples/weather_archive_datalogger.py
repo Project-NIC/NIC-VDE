@@ -81,7 +81,7 @@ def main() -> None:
     print(f"[ARCHIVE] {out_dir}  ({files} files, {total} records, "
           f"{len(STATIONS)} streams, row width {ROW_WIDTH} B)")
     print("Each file starts every stream on a keyframe → decodable on its own.")
-    print("Export the whole set:  python3 ../NIC-GLUE-OUT/examples/weather_archive_export.py "
+    print("Export the whole set:  python3 ../../glue-out/examples/weather_archive_export.py "
           f"{out_dir}")
 
 

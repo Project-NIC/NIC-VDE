@@ -1,8 +1,8 @@
 # NIC-GLUE-IN — C build.  MLA / DMD sources referenced, never vendored.
 #   make NIC_MLA=/path NIC_DMD=/path   to retarget (central library later)
 #   -DDMD_PKT_MAX_BUILD=N (via CFLAGS)  for fixed-size / no-VLA MCU builds
-NIC_MLA ?= ../../NIC-MLA
-NIC_DMD ?= ../../NIC-DMD
+NIC_MLA ?= ../../mla
+NIC_DMD ?= ../../dmd
 
 CC      ?= cc
 CFLAGS  ?= -std=c99 -Wall -Wextra -O2
